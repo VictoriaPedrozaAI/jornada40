@@ -1,0 +1,4 @@
+store_id,date,hour,role,required_headcount,is_peak
+T001,2027-01-04,8,,4,
+T001,2027-01-04,13,cajero,6,1
+T001,2027-01-04,13,piso,8,1

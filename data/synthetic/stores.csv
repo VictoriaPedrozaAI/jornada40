@@ -1,0 +1,51 @@
+store_id,store_name,salary_zone,state,opening_time,closing_time,pre_open_minutes,post_close_minutes,min_headcount_open,customers_per_associate_hour,peak_threshold_pct
+1,Tienda 01,general,CDMX,09:00,22:00,60,60,4,12,20
+2,Tienda 02,general,CDMX,09:00,22:00,60,60,4,12,20
+3,Tienda 03,general,CDMX,09:00,22:00,60,60,4,12,20
+4,Tienda 04,general,CDMX,09:00,22:00,60,60,4,12,20
+5,Tienda 05,general,CDMX,09:00,22:00,60,60,4,12,20
+6,Tienda 06,general,CDMX,09:00,22:00,60,60,4,12,20
+7,Tienda 07,general,CDMX,09:00,22:00,60,60,4,12,20
+8,Tienda 08,general,CDMX,09:00,22:00,60,60,4,12,20
+9,Tienda 09,general,CDMX,09:00,22:00,60,60,4,12,20
+10,Tienda 10,general,CDMX,09:00,22:00,60,60,4,12,20
+11,Tienda 11,general,CDMX,09:00,22:00,60,60,4,12,20
+12,Tienda 12,general,CDMX,09:00,22:00,60,60,4,12,20
+13,Tienda 13,general,CDMX,09:00,22:00,60,60,4,12,20
+14,Tienda 14,general,CDMX,09:00,22:00,60,60,4,12,20
+15,Tienda 15,general,CDMX,09:00,22:00,60,60,4,12,20
+16,Tienda 16,general,CDMX,09:00,22:00,60,60,4,12,20
+17,Tienda 17,general,CDMX,09:00,22:00,60,60,4,12,20
+18,Tienda 18,general,CDMX,09:00,22:00,60,60,4,12,20
+19,Tienda 19,general,CDMX,09:00,22:00,60,60,4,12,20
+20,Tienda 20,general,CDMX,09:00,22:00,60,60,4,12,20
+21,Tienda 21,general,CDMX,09:00,22:00,60,60,4,12,20
+22,Tienda 22,general,CDMX,09:00,22:00,60,60,4,12,20
+23,Tienda 23,general,CDMX,09:00,22:00,60,60,4,12,20
+24,Tienda 24,general,CDMX,09:00,22:00,60,60,4,12,20
+25,Tienda 25,general,CDMX,09:00,22:00,60,60,4,12,20
+26,Tienda 26,general,CDMX,09:00,22:00,60,60,4,12,20
+27,Tienda 27,general,CDMX,09:00,22:00,60,60,4,12,20
+28,Tienda 28,general,CDMX,09:00,22:00,60,60,4,12,20
+29,Tienda 29,general,CDMX,09:00,22:00,60,60,4,12,20
+30,Tienda 30,general,CDMX,09:00,22:00,60,60,4,12,20
+31,Tienda 31,general,CDMX,09:00,22:00,60,60,4,12,20
+32,Tienda 32,general,CDMX,09:00,22:00,60,60,4,12,20
+33,Tienda 33,general,CDMX,09:00,22:00,60,60,4,12,20
+34,Tienda 34,general,CDMX,09:00,22:00,60,60,4,12,20
+35,Tienda 35,general,CDMX,09:00,22:00,60,60,4,12,20
+36,Tienda 36,general,CDMX,09:00,22:00,60,60,4,12,20
+37,Tienda 37,general,CDMX,09:00,22:00,60,60,4,12,20
+38,Tienda 38,general,CDMX,09:00,22:00,60,60,4,12,20
+39,Tienda 39,general,CDMX,09:00,22:00,60,60,4,12,20
+40,Tienda 40,general,CDMX,09:00,22:00,60,60,4,12,20
+41,Tienda 41,general,CDMX,09:00,22:00,60,60,4,12,20
+42,Tienda 42,general,CDMX,09:00,22:00,60,60,4,12,20
+43,Tienda 43,general,CDMX,09:00,22:00,60,60,4,12,20
+44,Tienda 44,general,CDMX,09:00,22:00,60,60,4,12,20
+45,Tienda 45,general,CDMX,09:00,22:00,60,60,4,12,20
+46,Tienda 46,zlfn,Baja California,09:00,22:00,60,60,4,12,20
+47,Tienda 47,zlfn,Baja California,09:00,22:00,60,60,4,12,20
+48,Tienda 48,zlfn,Baja California,09:00,22:00,60,60,4,12,20
+49,Tienda 49,zlfn,Baja California,09:00,22:00,60,60,4,12,20
+50,Tienda 50,zlfn,Baja California,09:00,22:00,60,60,4,12,20

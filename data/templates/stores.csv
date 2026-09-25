@@ -1,0 +1,2 @@
+store_id,store_name,salary_zone,state,opening_time,closing_time,pre_open_minutes,post_close_minutes,min_headcount_open,customers_per_associate_hour,peak_threshold_pct
+T001,Tienda Centro,general,CDMX,09:00,22:00,60,60,4,12,20

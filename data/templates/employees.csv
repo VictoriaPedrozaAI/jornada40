@@ -1,0 +1,4 @@
+employee_id,store_id,salary_amount,salary_period,salary_zone,contract_weekly_hours,birth_date,hire_date,role,rest_day_preference
+E0001,T001,315.04,daily,general,,1990-04-12,2021-03-01,cajero,tue
+E0002,T001,9800,monthly,general,,1988-11-02,2019-07-15,piso,wed
+E0003,T001,,,general,,2001-06-20,2024-01-08,piso,

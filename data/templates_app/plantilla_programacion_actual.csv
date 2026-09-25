@@ -1,0 +1,4 @@
+tienda,empleado,puesto,salario_diario,en_piso,dias_descanso,zona,fecha,entrada,salida
+T001,E0001,cajero,315.04,1,mar|mie,general,2026-09-28,09:00,17:00
+T001,E0002,piso,330.0,1,sab|dom,general,2026-09-28,14:00,22:00
+T001,A0001,gerente,1600.0,0,sab|dom,general,2026-09-28,09:00,17:00
