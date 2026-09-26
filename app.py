@@ -1,6 +1,7 @@
 """Jornada40 — MVP (Streamlit, multipage). Run: streamlit run app.py
 
-Menu (D37): Inicio · Datos · Diagnóstico · Nueva programación — one page per step of the job.
+v3 flow (docs/CHANGELOG_v2.md #5): left menu = Reiniciar App · Inicio · Diagnóstico · Generar Programación.
+Inicio holds the demo, the template download, the uploads, the chain's opening schedule and the scenario.
 Solver core lives in the `jornada40` package and does not depend on this UI.
 """
 from __future__ import annotations
@@ -14,7 +15,6 @@ import pandas as pd
 import streamlit as st
 
 from jornada40 import config
-from jornada40.checks import presolve_checks
 from jornada40.ingest.flat import SCHEDULE_COLS, load_chain
 from jornada40.optimizer import OBJECTIVE_COMPONENTS, OptimizerSettings
 from jornada40.pipeline import assess_store, assessment_row, demo_chain, run_store, shift_rows
@@ -24,14 +24,31 @@ TPL = ROOT / "data" / "templates_app"
 CUR, PRO, NEED, UP, DOWN = "#9A3B3B", "#1F6F5C", "#1B2421", "#C0873F", "#1F6F5C"
 DAYS_ES = {"Mon": "Lun", "Tue": "Mar", "Wed": "Mié", "Thu": "Jue", "Fri": "Vie", "Sat": "Sáb", "Sun": "Dom"}
 WD_ES = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
-SCENARIOS = {"Tope de 40 h (reforma completa)": 2030, "Transición — 42 h": 2029, "Transición — 44 h": 2028,
-             "Transición — 46 h": 2027}
+WEEKDAY_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+SCENARIOS = {"40 Horas": 2030, "42 Horas": 2029, "44 Horas": 2028, "46 Horas": 2027}
 POLICIES = {"5": "Semana de 5 días", "6": "Semana de 6 días"}
 OFFPEAK_PENALTY_MXN = 150.0  # off-peak shortfall weight (D31); not user-facing since v2
 SOLVER_TIME_LIMIT_S = 10.0  # safety cap; stores solve to optimality in < 1 s
+HOURS = [f"{h:02d}:{m:02d}" for h in range(5, 24) for m in (0, 30)]
+OPEN, CLOSED = "Abierta", "Cerrada"
 
 st.set_page_config(page_title="Jornada40 · Programación semanal", page_icon="📅", layout="wide")
 ss = st.session_state
+
+# Streamlit drops widget state on a page change; re-assigning the keys keeps the user's choices
+# (bug found in v2, CHANGELOG #4). The scenario lives in ss["scenario"], shared by two selectors.
+_PERSIST = ["scenario"] + [f"h_{k}_{d}" for d in range(7) for k in ("state", "open", "close")]
+for _k in _PERSIST:
+    if _k in ss:
+        ss[_k] = ss[_k]
+ss.setdefault("scenario", "40 Horas")
+scen = ss["scenario"]
+year = SCENARIOS[scen]
+wmax, cap = config.weekly_max_ordinary(year), config.overtime_cap_2x(year)
+if ss.get("year_key") != year:  # scenario changed -> recompute diagnosis and results
+    for _k in ("assess", "results"):
+        ss.pop(_k, None)
+    ss["year_key"] = year
 
 
 # ---------------------------------------------------------------- helpers
@@ -61,18 +78,22 @@ def dia(ts) -> str:
 
 
 def templates_zip() -> bytes:
+    """v3: only the filled example (50 stores x 80 employees) + instructions, no empty template."""
     return zip_bytes({
-        "plantilla_programacion_actual.csv": (TPL / "plantilla_programacion_actual.csv").read_bytes(),
-        "plantilla_requerimiento.csv": (TPL / "plantilla_requerimiento.csv").read_bytes(),
-        "LEEME.txt": ("programacion_actual.csv: una fila por turno trabajado.\n"
-                      "  tienda, empleado, puesto, salario_diario (MXN), en_piso (1 atiende piso / 0 administrativo),\n"
-                      "  dias_descanso (p. ej. sab|dom), zona (general|zlfn), fecha (AAAA-MM-DD), entrada, salida (HH:MM).\n"
-                      "  Si la salida es menor que la entrada, el turno termina al día siguiente.\n"
-                      "requerimiento.csv (opcional): cuántas personas necesitas en piso en cada hora de cada día.\n"
-                      "  Columnas: tienda, fecha, hora (0-23), personas_requeridas, es_pico (1/0, opcional).\n"
-                      "  Con este archivo detectamos horas con gente de más o de menos y los turnos siguen tu demanda.\n"
-                      "  Sin él se conserva la cobertura actual de cada tienda hora por hora y solo se eliminan\n"
-                      "  horas dobles, triples y descansos trabajados.\n").encode()})
+        "programacion_actual.csv": (TPL / "ejemplo_programacion_actual_50_tiendas.csv").read_bytes(),
+        "requerimiento.csv": (TPL / "ejemplo_requerimiento_50_tiendas.csv").read_bytes(),
+        "LEEME.txt": (
+            "Plantillas de ejemplo llenas: 50 tiendas x 80 empleados. Sustituye las filas por tus datos.\n\n"
+            "programacion_actual.csv (obligatorio): una fila por turno trabajado en la semana.\n"
+            "  tienda, empleado, puesto, salario_diario (MXN), en_piso (1 atiende piso / 0 administrativo),\n"
+            "  dias_descanso (p. ej. sab|dom), zona (general|zlfn), fecha (AAAA-MM-DD), entrada, salida (HH:MM).\n"
+            "  Si la salida es menor que la entrada, el turno termina al día siguiente.\n\n"
+            "requerimiento.csv (opcional pero recomendado): número de EMPLEADOS (no clientes) que necesitas en\n"
+            "  piso en cada hora de cada día. Columnas: tienda, fecha, hora (0-23), personas_requeridas,\n"
+            "  es_pico (1/0, opcional). Con este archivo detectamos horas con gente de más o de menos y los\n"
+            "  turnos siguen tu demanda; sin él se conserva tu cobertura actual hora por hora.\n\n"
+            "El horario de apertura y cierre y los días que la tienda cierra se capturan en la app (Inicio).\n"
+        ).encode()})
 
 
 @st.cache_resource(show_spinner=False)
@@ -86,7 +107,7 @@ def reset_downstream() -> None:
 
 
 def load_demo() -> None:
-    ss["inputs"], ss["source"], ss["msgs"] = _demo_inputs(), "demo sintética", ([], [])
+    ss["inputs"], ss["source"], ss["msgs"], ss["req_source"] = _demo_inputs(), "demo sintética", ([], []), "uploaded"
     reset_downstream()
 
 
@@ -101,117 +122,132 @@ def status_line() -> None:
         wk = next(iter(ss["inputs"].values())).week_start
         n_emp = sum(len(v.employees) for v in ss["inputs"].values())
         st.caption(f"{len(ss['inputs'])} tiendas · {n_emp:,} empleados · semana del {wk:%d/%m/%Y} · "
-                   f"fuente: {ss['source']} · reglas: {scen}")
+                   f"fuente: {ss['source']} · escenario: {scen}")
 
 
-# ---------------------------------------------------------------- sidebar (all pages)
+def _on_scenario(key: str) -> None:
+    ss["scenario"] = ss[key]
+
+
+def scenario_selector(key: str, label: str) -> None:
+    """Same scenario in Inicio and Diagnóstico (ss['scenario'] is the single source of truth)."""
+    st.selectbox(label, list(SCENARIOS), index=list(SCENARIOS).index(ss["scenario"]), key=key,
+                 on_change=_on_scenario, args=(key,))
+    st.caption(f"Tope: **{wmax} h/semana**. Horas {wmax + 1}–{wmax + cap}: pago **doble**. "
+               f"Horas {wmax + cap + 1}–{wmax + cap + 4}: pago **triple**. Más allá: prohibido.")
+
+
+def run_generation() -> None:
+    inputs, assess = ss["inputs"], ss["assess"]
+    bar = st.progress(0.0, text="Optimizando…")
+    out, total, i = {}, 2 * len(inputs), 0
+    for pol, label in POLICIES.items():
+        settings = OptimizerSettings(year=year, time_limit_s=SOLVER_TIME_LIMIT_S,
+                                     offpeak_under_penalty_mxn=OFFPEAK_PENALTY_MXN, allow_sixth_day=False,
+                                     week_policy=pol)
+        out[pol] = {}
+        for k, v in inputs.items():
+            out[pol][k] = run_store(v, year, settings, current=assess[k])
+            i += 1
+            bar.progress(i / total, text=f"{label} · tienda {k}")
+    ss["results"] = out
+
+
+# ---------------------------------------------------------------- sidebar: menu only (v3)
 def sidebar() -> None:
-    global scen, year, wmax, cap, offpeak, sixth, tlimit
     with st.sidebar:
-        st.header("Escenario")
-        scen = st.selectbox("Reglas LFT", list(SCENARIOS), index=0,
-                            help="El tope semanal define desde qué hora se paga doble.")
-        year = SCENARIOS[scen]
-        wmax, cap = config.weekly_max_ordinary(year), config.overtime_cap_2x(year)
-        st.caption(f"Tope: **{wmax} h/semana**. Horas {wmax + 1}–{wmax + cap}: pago **doble**. "
-                   f"Horas {wmax + cap + 1}–{wmax + cap + 4}: pago **triple**. Más allá: prohibido.")
-        st.header("Horas extra")
-        sixth = st.checkbox(
-            "Permitir un 6.º día pagado como horas extra",
-            value=False)
-        st.caption("Si tu sucursal trabaja 5 días (8 h diarias) con 2 de descanso, marca la casilla para permitir "
-                   "que el modelo asigne un 6.º día completo, pagado como horas extra, a algunos colaboradores "
-                   "solo cuando sea completamente necesario.")
-        # v2: fixed solver settings (no longer exposed in the UI) — see docs/CHANGELOG_v2.md
-        offpeak, tlimit = OFFPEAK_PENALTY_MXN, SOLVER_TIME_LIMIT_S
-        if st.button("Empezar de nuevo", width="stretch"):
-            for k in ("inputs", "assess", "results", "source", "msgs"):
-                ss.pop(k, None)
+        if st.button("Reiniciar App", icon=":material/restart_alt:", width="stretch"):
+            for k in list(ss.keys()):
+                del ss[k]
             st.switch_page(P_HOME)
-    if ss.get("year_key") != year:  # rules changed -> recompute diagnosis and results
-        reset_downstream()
-        ss["year_key"] = year
-    if ss.get("sixth_key") != sixth:  # overtime policy changed -> results are stale
-        ss.pop("results", None)
-        ss["sixth_key"] = sixth
+        st.divider()
+        st.page_link(P_HOME, label="Inicio", icon=":material/home:")
+        st.page_link(P_DIAG, label="Diagnóstico", icon=":material/monitoring:")
+        st.page_link(P_NEW, label="Generar Programación", icon=":material/event_available:")
 
 
 # ================================================================ INICIO
+def schedule_form() -> tuple[dict[int, tuple[str, str] | None], list[str]]:
+    """One opening schedule for the whole chain. Every day must be filled: open with hours, or closed."""
+    st.markdown("**Agrega aquí el horario de tu operación y los días de trabajo / descanso**")
+    st.caption("Un solo horario para todas las tiendas. Si marcas un día como **Cerrada**, nadie se programa ese día.")
+    hours, issues = {}, []
+    h = st.columns([1.2, 1.4, 1.2, 1.2])
+    for col, t in zip(h, ("Día", "Tienda", "Apertura", "Cierre")):
+        col.markdown(f"<small><b>{t}</b></small>", unsafe_allow_html=True)
+    for d, name in enumerate(WEEKDAY_NAMES):
+        c = st.columns([1.2, 1.4, 1.2, 1.2], vertical_alignment="center")
+        c[0].markdown(name)
+        state = c[1].selectbox(name, [OPEN, CLOSED], index=None, placeholder="Selecciona…",
+                               key=f"h_state_{d}", label_visibility="collapsed")
+        disabled = state != OPEN
+        o = c[2].selectbox(f"{name} apertura", HOURS, index=None, placeholder="—" if disabled else "Apertura",
+                           key=f"h_open_{d}", label_visibility="collapsed", disabled=disabled)
+        cl = c[3].selectbox(f"{name} cierre", HOURS, index=None, placeholder="—" if disabled else "Cierre",
+                            key=f"h_close_{d}", label_visibility="collapsed", disabled=disabled)
+        if state is None:
+            issues.append(f"{name}: indica si la tienda abre o está cerrada.")
+        elif state == CLOSED:
+            hours[d] = None
+        elif o is None or cl is None:
+            issues.append(f"{name}: selecciona hora de apertura y de cierre.")
+        elif cl <= o:
+            issues.append(f"{name}: el cierre debe ser después de la apertura.")
+        else:
+            hours[d] = (o, cl)
+    if not issues and sum(v is not None for v in hours.values()) < 5:
+        issues.append("La tienda debe abrir al menos 5 días a la semana (turnos de tiempo completo).")
+    return hours, issues
+
+
 def page_home() -> None:
     st.title("Jornada40")
-    st.markdown("#### Esta herramienta te ayuda a que tu operación actual respete el tope legal de 40 horas por "
-                "empleado a la semana.")
-    st.markdown("A continuación puedes probar la demo y ver cómo nuestra herramienta detecta si se están pagando "
-                "horas dobles o triples. Al dar clic en probar podrás ver el diagnóstico.")
+    st.markdown("#### Esta herramienta te ayuda a que tu operación actual respete el tope legal de horas "
+                "trabajadas por empleado a la semana conforme a lo establecido por la Ley Federal del Trabajo.")
     if "inputs" in ss:
         with st.container(border=True):
             status_line()
             nxt = P_NEW if "results" in ss else P_DIAG
-            if st.button(f"Continuar → {nxt.title}", type="primary"):
+            if st.button(f"Continuar → {'Generar Programación' if nxt is P_NEW else 'Diagnóstico'}"):
                 st.switch_page(nxt)
+
     with st.container(border=True):
         st.markdown("**⚡ Pruébalo ahora**")
-        st.caption("Carga la demo sintética: 50 tiendas × 80 empleados, semana del 28/09/2026.")
-        if st.button("Probar con la demo de 50 tiendas", type="primary"):
+        st.markdown("Este demo cargará data sintética de 50 tiendas con 80 FTEs (empleados) cada una.")
+        if st.button("Probar demo", type="primary"):
             load_demo()
             st.switch_page(P_DIAG)
 
-    st.header("Usa tus datos y genera un diagnóstico de tu operación actual")
-    st.subheader("Por favor descarga nuestra plantilla y llénala con tu programación real")
-    st.download_button("Descargar plantilla", templates_zip(), "jornada40_plantillas.zip", type="primary",
-                       icon=":material/download:")
-    st.markdown("##### Cómo funciona")
-    a, b, c = st.columns(3)
-    with a, st.container(border=True, height="stretch"):
-        st.markdown("**1 · Cómo llenar la plantilla**")
-        st.markdown(
-            "**programacion_actual.csv** (obligatorio): una fila por cada turno trabajado en la semana, con tienda, "
-            "empleado, puesto, salario diario, fecha, hora de entrada y hora de salida.\n\n"
-            "**requerimiento.csv** (opcional): cuántas personas necesitas en piso en cada hora de cada día. "
-            "Con este dato detectamos horas con gente de más o de menos y armamos turnos que siguen tu demanda. "
-            "Sin él, respetamos la cobertura que tienes hoy y solo eliminamos horas dobles, triples y descansos "
-            "trabajados.")
-    with b, st.container(border=True, height="stretch"):
-        st.markdown("**2 · Súbela y revisa el diagnóstico**")
-        st.markdown("Horas pagadas dobles y triples y su costo, descansos trabajados, prima dominical, violaciones "
-                    "a la LFT y un chequeo de capacidad por tienda.")
-        st.page_link(P_DATA, label="Subir mi plantilla", icon=":material/upload_file:")
-    with c, st.container(border=True, height="stretch"):
-        st.markdown("**3 · Genera la nueva programación**")
-        st.markdown("CP-SAT arma la programación de cada tienda con semana de 5 y de 6 días; comparas ahorro y "
-                    "cobertura y descargas la que elijas.")
+    st.header("¿Quieres usar tus datos?")
+    st.markdown("Para usar tus datos por favor descarga nuestras plantillas, llénalas con tu programación real y "
+                "agrega horario/días de descanso.")
+    st.info("**Importante:** la plantilla de requerimiento es opcional, sin embargo es aconsejable llenarla pues "
+            "contiene información relevante sobre el número de empleados mínimos necesarios por hora para cubrir "
+            "las necesidades de tu operación.")
+    st.download_button("Descargar plantilla", templates_zip(), "jornada40_plantillas_ejemplo_50_tiendas.zip",
+                       type="primary", icon=":material/download:")
+    st.caption("La plantilla viene llena con el ejemplo de 50 tiendas × 80 empleados; sustituye las filas por tus datos.")
 
+    st.markdown("**Nota:** cuando tengas las plantillas llenas con tus datos, súbelas aquí:")
+    f_sched = st.file_uploader("1. programacion_actual.csv", type="csv", key="up_sched")
+    f_req = st.file_uploader("2. requerimiento.csv (opcional)", type="csv", key="up_req")
 
-# ================================================================ DATOS
-def page_data() -> None:
-    st.title("Datos")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**1. Descarga la plantilla**, llénala con la programación real de la semana (una fila por "
-                    "turno) y súbela.")
-        st.caption("**requerimiento.csv** (opcional): cuántas personas necesitas en piso en cada hora de cada día. "
-                   "Con él detectamos horas con gente de más o de menos y armamos turnos que siguen tu demanda; sin "
-                   "él, respetamos tu cobertura actual y solo eliminamos horas dobles, triples y descansos trabajados.")
-        st.download_button("Descargar plantillas CSV", templates_zip(), "jornada40_plantillas.zip", width="stretch")
-        st.download_button("Descargar ejemplo lleno (50 tiendas × 80 empleados)", zip_bytes({
-            "programacion_actual.csv": (TPL / "ejemplo_programacion_actual_50_tiendas.csv").read_bytes(),
-            "requerimiento.csv": (TPL / "ejemplo_requerimiento_50_tiendas.csv").read_bytes()}),
-            "jornada40_ejemplo_50_tiendas.zip", width="stretch")
-        st.caption("Columnas: " + ", ".join(SCHEDULE_COLS) + ". También acepta encabezados en inglés y `;`.")
-    with c2:
-        f_sched = st.file_uploader("2. programacion_actual.csv", type="csv")
-        f_req = st.file_uploader("requerimiento.csv (opcional)", type="csv")
-        b1, b2 = st.columns(2)
-        if b1.button("Analizar mis archivos", type="primary", disabled=f_sched is None, width="stretch"):
-            with st.spinner("Leyendo archivos…"):
-                ch = load_chain(f_sched, f_req, year)
-            ss["msgs"] = (ch.errors, ch.warnings)
-            if ch.stores and not ch.errors:
-                ss["inputs"], ss["source"] = ch.stores, "archivos del usuario"
-                reset_downstream()
-                st.switch_page(P_DIAG)
-        if b2.button("Usar demo de 50 tiendas", width="stretch"):
-            load_demo()
+    day_hours, issues = schedule_form()
+
+    st.markdown("**Por último selecciona el escenario con las horas tope que debería cumplir tu operación semanal "
+                "aquí:**")
+    scenario_selector("scen_home", "Horas tope por semana")
+
+    missing = ([] if f_sched is not None else ["Sube programacion_actual.csv."]) + issues
+    if missing and (f_sched is not None or any(k in ss and ss[k] for k in (f"h_state_{d}" for d in range(7)))):
+        st.warning("Para continuar falta:\n\n" + "\n".join(f"- {m}" for m in missing))
+    if st.button("Analizar mis archivos", type="primary", disabled=bool(missing)):
+        with st.spinner("Leyendo archivos…"):
+            ch = load_chain(f_sched, f_req, year, day_hours=day_hours)
+        ss["msgs"] = (ch.errors, ch.warnings)
+        if ch.stores and not ch.errors:
+            ss["inputs"], ss["source"], ss["req_source"] = ch.stores, "archivos del usuario", ch.requirement_source
+            reset_downstream()
             st.switch_page(P_DIAG)
     errs, warns = ss.get("msgs", ([], []))
     for e in errs:
@@ -220,119 +256,120 @@ def page_data() -> None:
         with st.expander(f"{len(warns)} avisos"):
             for w in warns:
                 st.write("•", w)
-    if "inputs" in ss:
-        status_line()
 
 
 # ================================================================ DIAGNÓSTICO
 def page_diag() -> None:
     st.title("Diagnóstico de la programación actual")
     if "inputs" not in ss:
-        st.info("Primero carga datos.")
-        st.page_link(P_DATA, label="Ir a Datos", icon=":material/upload_file:")
+        st.info("Primero carga datos: prueba la demo o sube tus archivos en Inicio.")
+        st.page_link(P_HOME, label="Ir a Inicio", icon=":material/home:")
         return
+    scenario_selector("scen_diag", "Escenario de horas tope por semana")
     ensure_assessed()
     inputs, assess = ss["inputs"], ss["assess"]
     status_line()
+    has_req = ss.get("req_source") != "current coverage"
     diag = pd.DataFrame([assessment_row(k, inputs[k], assess[k], year) for k in inputs])
-    extra = diag.costo_horas_dobles.sum() + diag.costo_horas_triples.sum()
+    diag["empleados_requeridos"] = [int(inputs[k].requirement["required_headcount"].max()) if has_req else None
+                                    for k in inputs]
+
+    st.markdown("**De acuerdo a la información compartida tu operación cuenta con:**")
+    a, b, c = st.columns(3)
+    a.metric("Tiendas", f"{len(diag):,}")
+    b.metric("Empleados", f"{diag.empleados.sum():,}")
+    c.metric("Costo laboral semanal total", mxn(diag.costo_semanal.sum()))
+
+    st.markdown("**En tu programación actual se detectaron:**")
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Horas pagadas dobles", f"{diag.horas_dobles.sum():,.0f} h",
+    k1.metric("Horas dobles pagadas", f"{diag.horas_dobles.sum():,.0f} h",
               help=f"Desde la hora {wmax + 1} de la semana o por encima del máximo diario de la jornada.")
-    k2.metric("Costo de horas dobles y triples", mxn(extra))
-    k3.metric("Descansos trabajados (triple)", f"{diag.descansos_trabajados.sum():,}")
-    k4.metric("Costo laboral semanal", mxn(diag.costo_semanal.sum()))
-    st.markdown(f"Horas triples: **{diag.horas_triples.sum():,.0f} h** · costo de descansos trabajados: "
-                f"**{md_mxn(diag.costo_descansos.sum())}** · prima dominical: **{md_mxn(diag.prima_dominical.sum())}** · "
-                f"extras y primas = **{diag.primas_total.sum() / diag.costo_semanal.sum() * 100:.1f} %** del costo laboral.")
-    st.caption("Una hora se paga **doble** cuando rebasa el tope semanal o el máximo diario de su tipo de jornada "
-               "(8 h diurna, 7.5 h mixta, 7 h nocturna — arts. 60–61, 66–68 LFT). Trabajar el día de descanso o un "
-               "feriado se paga triple (arts. 73 y 75). Tarifa por hora = salario diario ÷ 8.")
+    k2.metric("Horas triples pagadas", f"{diag.horas_triples.sum():,.0f} h")
+    k3.metric("Prima dominical pagada", mxn(diag.prima_dominical.sum()))
+    extras = diag.primas_total.sum()
+    k4.metric("Costo de horas extra y primas", mxn(extras),
+              f"{extras / diag.costo_semanal.sum() * 100:.1f} % del costo laboral semanal", delta_color="off")
+    st.caption(f"Incluye horas dobles y triples ({md_mxn(diag.costo_horas_dobles.sum() + diag.costo_horas_triples.sum())}), "
+               f"descansos trabajados pagados triple ({diag.descansos_trabajados.sum():,} · "
+               f"{md_mxn(diag.costo_descansos.sum())}), feriados ({md_mxn(diag.costo_feriados.sum())}) y prima "
+               "dominical. Una hora se paga doble cuando rebasa el tope semanal o el máximo diario de su jornada "
+               "(8 h diurna, 7.5 h mixta, 7 h nocturna — arts. 60–61, 66–68 LFT).")
 
-    l, r = st.columns([3, 2])
-    with l:
-        show = diag[["tienda", "empleados", "horas_dobles", "costo_horas_dobles", "horas_triples",
-                     "descansos_trabajados", "prima_dominical", "primas_total", "costo_semanal", "faltante_pico_h",
-                     "violaciones"]]
-        st.dataframe(show.sort_values("primas_total", ascending=False), hide_index=True, width="stretch", height=320,
-                     column_config={c: st.column_config.NumberColumn(format="$%,.0f") for c in
-                                    ("costo_horas_dobles", "prima_dominical", "primas_total", "costo_semanal")})
-    with r:
-        top = diag.nlargest(15, "primas_total").melt(id_vars="tienda", value_vars=[
-            "costo_horas_dobles", "costo_horas_triples", "costo_descansos", "costo_feriados", "prima_dominical"],
-            var_name="concepto", value_name="MXN")
-        names = {"costo_horas_dobles": "Horas dobles", "costo_horas_triples": "Horas triples",
-                 "costo_descansos": "Descanso trabajado", "costo_feriados": "Feriado", "prima_dominical": "Prima dominical"}
-        top["concepto"] = top["concepto"].map(names)
-        st.altair_chart(alt.Chart(top).mark_bar().encode(
-            y=alt.Y("tienda:N", sort="-x", title="Tienda"), x=alt.X("sum(MXN):Q", title="Extras y primas, MXN/semana"),
-            color=alt.Color("concepto:N", title=None, legend=alt.Legend(orient="bottom", columns=2, labelLimit=200),
-                            scale=alt.Scale(domain=list(names.values()),
-                                            range=[CUR, "#C98B6B", "#6B4E71", "#8A8F4A", "#9AA5A0"]))),
-            width="stretch")
-        st.caption("15 tiendas con más costo en extras.")
+    st.subheader("Top 15 de sucursales con más gasto en horas extra y primas")
+    top = diag.nlargest(15, "primas_total").melt(id_vars="tienda", value_vars=[
+        "costo_horas_dobles", "costo_horas_triples", "costo_descansos", "costo_feriados", "prima_dominical"],
+        var_name="concepto", value_name="MXN")
+    names = {"costo_horas_dobles": "Horas dobles", "costo_horas_triples": "Horas triples",
+             "costo_descansos": "Descanso trabajado", "costo_feriados": "Feriado", "prima_dominical": "Prima dominical"}
+    top["concepto"] = top["concepto"].map(names)
+    order = diag.nlargest(15, "primas_total")["tienda"].astype(str).tolist()
+    top["tienda"] = top["tienda"].astype(str)
+    st.altair_chart(alt.Chart(top).mark_bar().encode(
+        y=alt.Y("tienda:N", sort=order, title="Tienda"), x=alt.X("MXN:Q", stack=True, title="MXN por semana"),
+        color=alt.Color("concepto:N", title=None, legend=alt.Legend(orient="bottom", columns=3, labelLimit=200),
+                        scale=alt.Scale(domain=list(names.values()),
+                                        range=[CUR, "#C98B6B", "#6B4E71", "#8A8F4A", "#9AA5A0"])),
+        # explicit tooltip: otherwise Streamlit shows its internal "_concepto_sort_index" field (v3 note)
+        tooltip=[alt.Tooltip("tienda:N", title="Tienda"), alt.Tooltip("concepto:N", title="Concepto"),
+                 alt.Tooltip("MXN:Q", format="$,.0f")]),
+        width="stretch")
 
-    with st.expander("Detalle por empleado"):
-        sid = st.selectbox("Tienda", list(inputs), key="diag_store")
-        emp = inputs[sid].employees.set_index("employee_id")
-        rows = [(w.employee_id, emp.loc[w.employee_id, "role"], w.worked_h + w.restday_h, w.ot_2x_h, w.ot_3x_h,
-                 w.restdays_worked,
-                 float(emp.loc[w.employee_id, "daily_salary"]) / 8 * (2 * w.ot_2x_h + 3 * w.ot_3x_h))
-                for w in assess[sid].report.weeks]
-        det = pd.DataFrame(rows, columns=["empleado", "puesto", "horas_trabajadas", "horas_dobles", "horas_triples",
-                                          "descansos_trabajados", "costo_extra"]).sort_values("costo_extra",
-                                                                                              ascending=False)
-        st.dataframe(det, hide_index=True, width="stretch",
-                     column_config={"costo_extra": st.column_config.NumberColumn(format="$%,.2f")})
-    st.download_button("Descargar diagnóstico (CSV)", diag.to_csv(index=False).encode(), "diagnostico_actual.csv")
+    st.subheader("Detalle por tienda")
+    show = diag[["tienda", "empleados", "horas_dobles", "costo_horas_dobles", "horas_triples", "descansos_trabajados",
+                 "prima_dominical", "primas_total", "costo_semanal", "faltante_pico_h", "empleados_requeridos",
+                 "violaciones"]].rename(columns={
+                     "primas_total": "costo_extras_y_primas", "faltante_pico_h": "Personal_faltante_en_pico",
+                     "violaciones": "Violaciones_LFT"})
+    st.dataframe(show.sort_values("costo_extras_y_primas", ascending=False), hide_index=True, width="stretch",
+                 height=320, column_config={
+                     **{c: st.column_config.NumberColumn(format="$%,.0f") for c in
+                        ("costo_horas_dobles", "prima_dominical", "costo_extras_y_primas", "costo_semanal")},
+                     "Personal_faltante_en_pico": st.column_config.NumberColumn(
+                         help="Persona-horas que faltaron en horas pico: empleados requeridos menos empleados en "
+                              "piso, sumado cada 30 minutos de las horas pico de la semana."),
+                     "empleados_requeridos": st.column_config.NumberColumn(
+                         help="Máximo de empleados requeridos en una hora de la semana, según requerimiento.csv."),
+                     "Violaciones_LFT": st.column_config.NumberColumn(
+                         help="Casos que rompen la LFT: más de 4 días con horas extra, más de 12 h seguidas, "
+                              "7 días seguidos, menores fuera de norma.")})
+    if not has_req:
+        st.caption("Sin requerimiento.csv: *Personal_faltante_en_pico* y *empleados_requeridos* no se pueden medir.")
 
-    # ---- pre-solve checks (D37)
-    st.subheader("Chequeo de capacidad antes de optimizar")
-    chk = []
-    for k, v in inputs.items():
-        for c in presolve_checks(v.requirement, v.week_start, len(v.floor_ids), year):
-            chk.append({"tienda": k, "semana": POLICIES[c.policy], "estado": c.severity, "mensaje": c.message,
-                        "persona_dias_min": c.need_person_days, "persona_dias_disp": c.capacity_person_days})
-    chk = pd.DataFrame(chk)
-    icon = {"error": "🔴 faltante en pico garantizado", "warning": "🟡 faltante fuera de pico / capacidad justa",
-            "ok": "🟢 sin problemas detectados"}
-    summary = chk.groupby(["semana", "estado"]).size().unstack(fill_value=0).reindex(
-        columns=["error", "warning", "ok"], fill_value=0).rename(columns=icon)
-    st.dataframe(summary, width="stretch")
-    st.caption("Cota rápida: puntos de demanda separados por al menos un turno no los puede cubrir la misma persona, "
-               "así que cada día necesita la suma de esas demandas en personas distintas. 🔴 es un problema seguro "
-               "con ese tipo de semana; 🟡/🟢 no garantizan cobertura perfecta (el optimizador da el resultado exacto).")
-    bad = chk[chk.estado == "error"]
-    if len(bad):
-        with st.expander(f"{len(bad)} tienda-escenarios con faltante en pico garantizado"):
-            st.dataframe(bad[["tienda", "semana", "persona_dias_min", "persona_dias_disp", "mensaje"]],
-                         hide_index=True, width="stretch")
+    st.subheader("Detalle por empleado")
+    sid = st.selectbox("Tienda", list(inputs), key="diag_store")
+    emp = inputs[sid].employees.set_index("employee_id")
+    rows = [(w.employee_id, emp.loc[w.employee_id, "role"], w.worked_h + w.restday_h, w.ot_2x_h, w.ot_3x_h,
+             w.restdays_worked, float(emp.loc[w.employee_id, "daily_salary"]) / 8 * (2 * w.ot_2x_h + 3 * w.ot_3x_h))
+            for w in assess[sid].report.weeks]
+    det = pd.DataFrame(rows, columns=["empleado", "puesto", "horas_trabajadas", "horas_dobles", "horas_triples",
+                                      "descansos_trabajados", "costo_extra"]).sort_values("costo_extra", ascending=False)
+    st.dataframe(det, hide_index=True, width="stretch",
+                 column_config={"costo_extra": st.column_config.NumberColumn(format="$%,.2f")})
+    st.download_button("Descargar diagnóstico (CSV)", show.to_csv(index=False).encode(), "diagnostico_actual.csv")
 
-    # ---- CTA
     st.divider()
     cta_l, cta_r = st.columns([2, 3])
-    shift6 = config.weekly_max_ordinary(year) * 60 // 6 // 30 * 30 / 60
+    shift6 = min(config.weekly_max_ordinary(year) * 60 // 6 // 30 * 30 / 60, 8)
     cta_r.markdown("Optimiza cada tienda con **CP-SAT** (Google OR-Tools) en dos escenarios para que compares: "
                    f"**semana de 5 días** (turnos de 8 h, 2 descansos) y **semana de 6 días** (turnos de "
-                   f"{min(shift6, 8):g} h, 1 descanso — art. 69). Ambos respetan el tope semanal.")
+                   f"{shift6:g} h, 1 descanso — art. 69). Ambos respetan el tope semanal.")
     if cta_l.button("Generar nueva programación", type="primary", width="stretch"):
-        bar = st.progress(0.0, text="Optimizando…")
-        out, total, i = {}, 2 * len(inputs), 0
-        for pol, label in POLICIES.items():
-            settings = OptimizerSettings(year=year, time_limit_s=float(tlimit),
-                                         offpeak_under_penalty_mxn=float(offpeak), allow_sixth_day=sixth,
-                                         week_policy=pol)
-            out[pol] = {}
-            for k, v in inputs.items():
-                out[pol][k] = run_store(v, year, settings, current=assess[k])
-                i += 1
-                bar.progress(i / total, text=f"{label} · tienda {k}")
-        ss["results"] = out
+        run_generation()
         st.switch_page(P_NEW)
 
 
-# ================================================================ NUEVA PROGRAMACIÓN
+# ================================================================ GENERAR PROGRAMACIÓN
+def valid(res: dict) -> dict:
+    """Stores where the week type applies (e.g. 6-day weeks need >= 6 open days)."""
+    return {k: r for k, r in res.items() if r.opt.status != "NO_APLICA"}
+
+
 def chain_kpis(res: dict) -> dict:
+    res = valid(res)
+    if not res:
+        return {k: None for k in ("Ahorro semanal (MXN)", "Ahorro %", "Tiendas con ahorro ≥ 8 % sin faltante en pico",
+                                  "Faltante en horas pico (persona-h)", "Faltante total (persona-h)",
+                                  "Horas sobre lo requerido", "Horas extra", "Prima dominical (MXN)")}
     s_ = pd.DataFrame([r.summary() for r in res.values()])
     c_ = lambda a: sum(float(getattr(r.proposed.cost, a)) for r in res.values())  # noqa: E731
     cur_total = s_.current_total.sum()
@@ -380,31 +417,47 @@ def waterfall(cur, pro, title: str) -> alt.Chart:
 
 
 def page_new() -> None:
-    st.title("Nueva programación y ahorro")
+    st.title("Generar programación")
     if "results" not in ss:
-        st.info("Genera la nueva programación desde el diagnóstico.")
-        st.page_link(P_DIAG, label="Ir a Diagnóstico", icon=":material/monitoring:")
+        if "inputs" not in ss:
+            st.info("Primero carga datos: prueba la demo o sube tus archivos en Inicio.")
+            st.page_link(P_HOME, label="Ir a Inicio", icon=":material/home:")
+            return
+        status_line()
+        st.info("Aún no has generado la nueva programación para estos datos.")
+        if st.button("Generar nueva programación", type="primary"):
+            ensure_assessed()
+            run_generation()
+            st.rerun()
         return
     status_line()
     cmp = pd.DataFrame({POLICIES[p]: chain_kpis(ss["results"][p]) for p in POLICIES})
     cmp.loc["Descansos por persona"] = ["2", "1"]
     fmt = {"Ahorro semanal (MXN)": "${:,.0f}", "Ahorro %": "{:.1f} %", "Prima dominical (MXN)": "${:,.0f}"}
-    cmp_show = cmp.apply(lambda row: [fmt.get(row.name, "{:,.0f}").format(v) if isinstance(v, (int, float)) else v
-                                      for v in row], axis=1, result_type="broadcast")
+    cmp_show = cmp.apply(lambda row: [fmt.get(row.name, "{:,.0f}").format(v) if isinstance(v, (int, float))
+                                      else ("No aplica" if v is None else v) for v in row],
+                         axis=1, result_type="broadcast")
     st.subheader("Compara: semana de 5 días vs 6 días")
     st.dataframe(cmp_show, width="stretch")
     a5, a6 = cmp.loc["Ahorro %"]
     s5, s6 = cmp.loc["Faltante total (persona-h)"]
-    st.caption(f"**Trade-off:** la semana de 6 días pone más personas por día con turnos más cortos → "
-               f"{'menos' if s6 < s5 else 'más'} faltante ({s5:,.0f} → {s6:,.0f} persona-h) pero más empleados "
-               f"trabajan domingo (prima dominical). Ahorro en efectivo: {a5:.1f} % vs {a6:.1f} %. "
-               "Ambas opciones son legales; la LFT solo exige 1 descanso por cada 6 días trabajados (art. 69).")
-    goal = cmp.loc["Tiendas con ahorro ≥ 8 % sin faltante en pico"]
+    if a6 is None:
+        st.caption("La semana de 6 días no aplica: la tienda abre menos de 6 días a la semana.")
+    else:
+        st.caption(f"**Trade-off:** la semana de 6 días pone más personas por día con turnos más cortos → "
+                   f"{'menos' if s6 < s5 else 'más'} faltante ({s5:,.0f} → {s6:,.0f} persona-h) pero más empleados "
+                   f"trabajan domingo (prima dominical). Ahorro en efectivo: {a5:.1f} % vs {a6:.1f} %. "
+                   "Ambas opciones son legales; la LFT solo exige 1 descanso por cada 6 días trabajados (art. 69).")
+    goal = cmp.loc["Tiendas con ahorro ≥ 8 % sin faltante en pico"].fillna(-1)
     default = POLICIES["5"] if goal[POLICIES["5"]] >= goal[POLICIES["6"]] else POLICIES["6"]
     choice = st.radio("Ver detalle y descargar:", list(POLICIES.values()), horizontal=True,
                       index=list(POLICIES.values()).index(default))
     pol = [p for p, lbl in POLICIES.items() if lbl == choice][0]
-    results = ss["results"][pol]
+    results = valid(ss["results"][pol])
+    if not results:
+        st.warning("Este tipo de semana no aplica con el horario de tu operación (la tienda abre menos días de los "
+                   "que requiere). Elige la otra opción.")
+        return
     summ = pd.DataFrame([r.summary() for r in results.values()])
     summ["store_id"] = list(results)
     tc, tp = summ.current_total.sum(), summ.proposed_total.sum()
@@ -530,11 +583,11 @@ def page_new() -> None:
         st.markdown((ROOT / "docs" / "app_method.md").read_text(encoding="utf-8"))
 
 
-# ================================================================ navigation
+# ================================================================ navigation (menu lives in the sidebar, v3)
 P_HOME = st.Page(page_home, title="Inicio", icon=":material/home:", default=True)
-P_DATA = st.Page(page_data, title="Datos", icon=":material/upload_file:", url_path="datos")
 P_DIAG = st.Page(page_diag, title="Diagnóstico", icon=":material/monitoring:", url_path="diagnostico")
-P_NEW = st.Page(page_new, title="Nueva programación", icon=":material/event_available:", url_path="nueva-programacion")
-nav = st.navigation([P_HOME, P_DATA, P_DIAG, P_NEW], position="top")
+P_NEW = st.Page(page_new, title="Generar Programación", icon=":material/event_available:",
+                url_path="generar-programacion")
+nav = st.navigation([P_HOME, P_DIAG, P_NEW], position="hidden")
 sidebar()
 nav.run()
