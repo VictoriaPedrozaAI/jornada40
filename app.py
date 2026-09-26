@@ -27,6 +27,8 @@ WD_ES = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
 SCENARIOS = {"Tope de 40 h (reforma completa)": 2030, "Transición — 42 h": 2029, "Transición — 44 h": 2028,
              "Transición — 46 h": 2027}
 POLICIES = {"5": "Semana de 5 días", "6": "Semana de 6 días"}
+OFFPEAK_PENALTY_MXN = 150.0  # off-peak shortfall weight (D31); not user-facing since v2
+SOLVER_TIME_LIMIT_S = 10.0  # safety cap; stores solve to optimality in < 1 s
 
 st.set_page_config(page_title="Jornada40 · Programación semanal", page_icon="📅", layout="wide")
 ss = st.session_state
@@ -56,6 +58,21 @@ def zip_bytes(files: dict[str, bytes]) -> bytes:
 def dia(ts) -> str:
     s = ts.strftime("%a %d")
     return DAYS_ES.get(s[:3], s[:3]) + s[3:]
+
+
+def templates_zip() -> bytes:
+    return zip_bytes({
+        "plantilla_programacion_actual.csv": (TPL / "plantilla_programacion_actual.csv").read_bytes(),
+        "plantilla_requerimiento.csv": (TPL / "plantilla_requerimiento.csv").read_bytes(),
+        "LEEME.txt": ("programacion_actual.csv: una fila por turno trabajado.\n"
+                      "  tienda, empleado, puesto, salario_diario (MXN), en_piso (1 atiende piso / 0 administrativo),\n"
+                      "  dias_descanso (p. ej. sab|dom), zona (general|zlfn), fecha (AAAA-MM-DD), entrada, salida (HH:MM).\n"
+                      "  Si la salida es menor que la entrada, el turno termina al día siguiente.\n"
+                      "requerimiento.csv (opcional): cuántas personas necesitas en piso en cada hora de cada día.\n"
+                      "  Columnas: tienda, fecha, hora (0-23), personas_requeridas, es_pico (1/0, opcional).\n"
+                      "  Con este archivo detectamos horas con gente de más o de menos y los turnos siguen tu demanda.\n"
+                      "  Sin él se conserva la cobertura actual de cada tienda hora por hora y solo se eliminan\n"
+                      "  horas dobles, triples y descansos trabajados.\n").encode()})
 
 
 @st.cache_resource(show_spinner=False)
@@ -98,56 +115,71 @@ def sidebar() -> None:
         wmax, cap = config.weekly_max_ordinary(year), config.overtime_cap_2x(year)
         st.caption(f"Tope: **{wmax} h/semana**. Horas {wmax + 1}–{wmax + cap}: pago **doble**. "
                    f"Horas {wmax + cap + 1}–{wmax + cap + 4}: pago **triple**. Más allá: prohibido.")
-        with st.expander("Parámetros del optimizador"):
-            offpeak = st.slider("Penalización por faltante fuera de pico (MXN por persona-hora)", 0, 1000, 150, 10,
-                                help="En horas pico el faltante está prácticamente prohibido. Fuera de pico, este "
-                                     "valor decide cuándo conviene pagar un 6.º día con horas extra para cubrir un hueco.")
-            sixth = st.checkbox("Semana de 5 días: permitir un 6.º día completo como horas extra si hace falta", True)
-            tlimit = st.slider("Tiempo máximo del solver por tienda (s)", 2, 30, 10)
+        st.header("Horas extra")
+        sixth = st.checkbox(
+            "Permitir un 6.º día pagado como horas extra",
+            value=False)
+        st.caption("Si tu sucursal trabaja 5 días (8 h diarias) con 2 de descanso, marca la casilla para permitir "
+                   "que el modelo asigne un 6.º día completo, pagado como horas extra, a algunos colaboradores "
+                   "solo cuando sea completamente necesario.")
+        # v2: fixed solver settings (no longer exposed in the UI) — see docs/CHANGELOG_v2.md
+        offpeak, tlimit = OFFPEAK_PENALTY_MXN, SOLVER_TIME_LIMIT_S
         if st.button("Empezar de nuevo", width="stretch"):
             for k in ("inputs", "assess", "results", "source", "msgs"):
                 ss.pop(k, None)
             st.switch_page(P_HOME)
-    if ss.get("year_key") != year:  # rules changed -> recompute downstream
+    if ss.get("year_key") != year:  # rules changed -> recompute diagnosis and results
         reset_downstream()
         ss["year_key"] = year
+    if ss.get("sixth_key") != sixth:  # overtime policy changed -> results are stale
+        ss.pop("results", None)
+        ss["sixth_key"] = sixth
 
 
 # ================================================================ INICIO
 def page_home() -> None:
     st.title("Jornada40")
-    st.markdown("#### Programación semanal que respeta el tope legal de horas y te dice cuánto ahorras.")
-    st.markdown("Para cadenas de hasta **50 tiendas**. Detecta las horas que hoy se pagan dobles o triples, "
-                "genera una nueva programación con **CP-SAT** y compara el costo en pesos.")
+    st.markdown("#### Esta herramienta te ayuda a que tu operación actual respete el tope legal de 40 horas por "
+                "empleado a la semana.")
+    st.markdown("A continuación puedes probar la demo y ver cómo nuestra herramienta detecta si se están pagando "
+                "horas dobles o triples. Al dar clic en probar podrás ver el diagnóstico.")
     if "inputs" in ss:
         with st.container(border=True):
             status_line()
             nxt = P_NEW if "results" in ss else P_DIAG
             if st.button(f"Continuar → {nxt.title}", type="primary"):
                 st.switch_page(nxt)
-    c1, c2 = st.columns(2)
-    with c1, st.container(border=True):
+    with st.container(border=True):
         st.markdown("**⚡ Pruébalo ahora**")
         st.caption("Carga la demo sintética: 50 tiendas × 80 empleados, semana del 28/09/2026.")
-        if st.button("Probar con la demo de 50 tiendas", type="primary", width="stretch"):
+        if st.button("Probar con la demo de 50 tiendas", type="primary"):
             load_demo()
             st.switch_page(P_DIAG)
-    with c2, st.container(border=True):
-        st.markdown("**📄 Usa tus datos**")
-        st.caption("Descarga la plantilla CSV, llénala con la programación real y súbela.")
-        if st.button("Ir a Datos", width="stretch"):
-            st.switch_page(P_DATA)
+
+    st.header("Usa tus datos y genera un diagnóstico de tu operación actual")
+    st.subheader("Por favor descarga nuestra plantilla y llénala con tu programación real")
+    st.download_button("Descargar plantilla", templates_zip(), "jornada40_plantillas.zip", type="primary",
+                       icon=":material/download:")
     st.markdown("##### Cómo funciona")
     a, b, c = st.columns(3)
-    for col, n, t, d in ((a, 1, "Datos", "Una fila por turno: tienda, empleado, salario diario, fecha, entrada y "
-                          "salida. Requerimiento por hora opcional."),
-                         (b, 2, "Diagnóstico", "Horas pagadas dobles y triples, descansos trabajados, prima "
-                          "dominical, violaciones LFT y chequeo de capacidad."),
-                         (c, 3, "Nueva programación", "CP-SAT optimiza cada tienda con semana de 5 y de 6 días; "
-                          "comparas ahorro y cobertura y descargas la que elijas.")):
-        with col, st.container(border=True):
-            st.markdown(f"**{n} · {t}**")
-            st.caption(d)
+    with a, st.container(border=True, height="stretch"):
+        st.markdown("**1 · Cómo llenar la plantilla**")
+        st.markdown(
+            "**programacion_actual.csv** (obligatorio): una fila por cada turno trabajado en la semana, con tienda, "
+            "empleado, puesto, salario diario, fecha, hora de entrada y hora de salida.\n\n"
+            "**requerimiento.csv** (opcional): cuántas personas necesitas en piso en cada hora de cada día. "
+            "Con este dato detectamos horas con gente de más o de menos y armamos turnos que siguen tu demanda. "
+            "Sin él, respetamos la cobertura que tienes hoy y solo eliminamos horas dobles, triples y descansos "
+            "trabajados.")
+    with b, st.container(border=True, height="stretch"):
+        st.markdown("**2 · Súbela y revisa el diagnóstico**")
+        st.markdown("Horas pagadas dobles y triples y su costo, descansos trabajados, prima dominical, violaciones "
+                    "a la LFT y un chequeo de capacidad por tienda.")
+        st.page_link(P_DATA, label="Subir mi plantilla", icon=":material/upload_file:")
+    with c, st.container(border=True, height="stretch"):
+        st.markdown("**3 · Genera la nueva programación**")
+        st.markdown("CP-SAT arma la programación de cada tienda con semana de 5 y de 6 días; comparas ahorro y "
+                    "cobertura y descargas la que elijas.")
 
 
 # ================================================================ DATOS
@@ -156,17 +188,11 @@ def page_data() -> None:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**1. Descarga la plantilla**, llénala con la programación real de la semana (una fila por "
-                    "turno) y súbela. El requerimiento por hora es opcional pero recomendado.")
-        st.download_button("Descargar plantillas CSV", zip_bytes({
-            "plantilla_programacion_actual.csv": (TPL / "plantilla_programacion_actual.csv").read_bytes(),
-            "plantilla_requerimiento.csv": (TPL / "plantilla_requerimiento.csv").read_bytes(),
-            "LEEME.txt": ("programacion_actual.csv: una fila por turno trabajado.\n"
-                          "  tienda, empleado, puesto, salario_diario (MXN), en_piso (1 atiende piso / 0 administrativo),\n"
-                          "  dias_descanso (p. ej. sab|dom), zona (general|zlfn), fecha (AAAA-MM-DD), entrada, salida (HH:MM).\n"
-                          "  Si la salida es menor que la entrada, el turno termina al día siguiente.\n"
-                          "requerimiento.csv (opcional): tienda, fecha, hora (0-23), personas_requeridas, es_pico (1/0).\n"
-                          "  Sin este archivo se conserva la cobertura actual de cada tienda hora por hora.\n").encode()}),
-            "jornada40_plantillas.zip", width="stretch")
+                    "turno) y súbela.")
+        st.caption("**requerimiento.csv** (opcional): cuántas personas necesitas en piso en cada hora de cada día. "
+                   "Con él detectamos horas con gente de más o de menos y armamos turnos que siguen tu demanda; sin "
+                   "él, respetamos tu cobertura actual y solo eliminamos horas dobles, triples y descansos trabajados.")
+        st.download_button("Descargar plantillas CSV", templates_zip(), "jornada40_plantillas.zip", width="stretch")
         st.download_button("Descargar ejemplo lleno (50 tiendas × 80 empleados)", zip_bytes({
             "programacion_actual.csv": (TPL / "ejemplo_programacion_actual_50_tiendas.csv").read_bytes(),
             "requerimiento.csv": (TPL / "ejemplo_requerimiento_50_tiendas.csv").read_bytes()}),
