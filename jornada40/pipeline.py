@@ -161,6 +161,7 @@ def assessment_row(store_id, inp: StoreInput, ev: Evaluation, year: int) -> dict
             "costo_descansos": float(c.restday_extra), "costo_feriados": float(c.feriado_extra),
             "prima_dominical": float(c.prima_dominical), "primas_total": float(c.premiums),
             "faltante_pico_h": c.understaff_peak_person_h, "sobredotacion_h": c.overstaff_person_h,
+            "subdotacion_h": c.understaff_person_h,
             "violaciones": sum(1 for f in ev.report.findings if f.kind == "VIOLATION"),
             "tope_semanal_h": config.weekly_max_ordinary(year)}
 
