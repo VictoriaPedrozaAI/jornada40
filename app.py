@@ -29,8 +29,8 @@ SCENARIOS = {"40 Horas": 2030, "42 Horas": 2029, "44 Horas": 2028, "46 Horas": 2
 POLICIES = {"5": "Semana de 5 días", "6": "Semana de 6 días"}
 OFFPEAK_PENALTY_MXN = 150.0  # off-peak shortfall weight (D31); not user-facing since v2
 SOLVER_TIME_LIMIT_S = 10.0  # safety cap; stores solve to optimality in < 1 s
-HOURS = [f"{h:02d}:{m:02d}" for h in range(5, 24) for m in (0, 30)]
-OPEN, CLOSED = "Abierta", "Cerrada"
+HOURS = [f"{h:02d}:{m:02d}" for h in range(0, 24) for m in (0, 30)] + ["24:00"]
+OPEN, OPEN24, CLOSED = "Abierta", "Abierta 24 h", "Cerrada"
 
 st.set_page_config(page_title="Jornada40 · Programación semanal", page_icon="📅", layout="wide")
 ss = st.session_state
@@ -170,7 +170,8 @@ def sidebar() -> None:
 def schedule_form() -> tuple[dict[int, tuple[str, str] | None], list[str]]:
     """One opening schedule for the whole chain. Every day must be filled: open with hours, or closed."""
     st.markdown("**Agrega aquí el horario de tu operación y los días de trabajo / descanso**")
-    st.caption("Un solo horario para todas las tiendas. Si marcas un día como **Cerrada**, nadie se programa ese día.")
+    st.caption("Un solo horario para todas las tiendas. **Abierta 24 h** para operación continua; **Cerrada** = "
+               "nadie se programa ese día.")
     hours, issues = {}, []
     h = st.columns([1.2, 1.4, 1.2, 1.2])
     for col, t in zip(h, ("Día", "Tienda", "Apertura", "Cierre")):
@@ -178,17 +179,21 @@ def schedule_form() -> tuple[dict[int, tuple[str, str] | None], list[str]]:
     for d, name in enumerate(WEEKDAY_NAMES):
         c = st.columns([1.2, 1.4, 1.2, 1.2], vertical_alignment="center")
         c[0].markdown(name)
-        state = c[1].selectbox(name, [OPEN, CLOSED], index=None, placeholder="Selecciona…",
+        state = c[1].selectbox(name, [OPEN, OPEN24, CLOSED], index=None, placeholder="Selecciona…",
                                key=f"h_state_{d}", label_visibility="collapsed")
         disabled = state != OPEN
-        o = c[2].selectbox(f"{name} apertura", HOURS, index=None, placeholder="—" if disabled else "Apertura",
+        o = c[2].selectbox(f"{name} apertura", HOURS[:-1], index=None,
+                           placeholder="00:00" if state == OPEN24 else ("—" if disabled else "Apertura"),
                            key=f"h_open_{d}", label_visibility="collapsed", disabled=disabled)
-        cl = c[3].selectbox(f"{name} cierre", HOURS, index=None, placeholder="—" if disabled else "Cierre",
+        cl = c[3].selectbox(f"{name} cierre", HOURS[1:], index=None,
+                            placeholder="24:00" if state == OPEN24 else ("—" if disabled else "Cierre"),
                             key=f"h_close_{d}", label_visibility="collapsed", disabled=disabled)
         if state is None:
-            issues.append(f"{name}: indica si la tienda abre o está cerrada.")
+            issues.append(f"{name}: indica si la tienda abre, abre 24 h o está cerrada.")
         elif state == CLOSED:
             hours[d] = None
+        elif state == OPEN24:
+            hours[d] = ("00:00", "24:00")
         elif o is None or cl is None:
             issues.append(f"{name}: selecciona hora de apertura y de cierre.")
         elif cl <= o:

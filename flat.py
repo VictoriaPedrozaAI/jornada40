@@ -39,6 +39,12 @@ WEEKDAYS = {"lun": 0, "mon": 0, "mar": 1, "tue": 1, "mie": 2, "mié": 2, "wed": 
             "vie": 4, "fri": 4, "sab": 5, "sáb": 5, "sat": 5, "dom": 6, "sun": 6}
 WD_EN = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
+FORMATO_MSG = ("El archivo de programación no tiene el formato esperado. Descarga la plantilla y súbela con las "
+               "columnas: tienda, empleado, salario_diario, fecha, entrada, salida.")
+REQ_BAD_MSG = ("No pudimos leer requerimiento.csv (formato o fechas fuera de la semana); se usará tu cobertura "
+               "actual. Revisa que las columnas sean tienda, fecha, hora, personas_requeridas y que las fechas "
+               "coincidan con tu programación.")
+
 
 @dataclass
 class ChainInput:
@@ -80,14 +86,17 @@ def load_chain(schedule_f, requirement_f=None, year: int = 2030, pre_post_min: i
     out = ChainInput()
     try:
         df = _read(schedule_f)
-    except Exception as e:  # noqa: BLE001
-        out.errors.append(f"No se pudo leer el archivo de programación: {e}")
+    except Exception:  # noqa: BLE001  (empty, not a CSV, bad encoding…)
+        out.errors.append(FORMATO_MSG)
+        return out
+    if df.shape[1] < 2:  # wrong delimiter or single-column junk
+        out.errors.append(FORMATO_MSG)
         return out
     if "salario_mensual" in df and "salario_diario" not in df:
         df["salario_diario"] = [str(_num(x) / 30) for x in df["salario_mensual"]]
     missing = [c for c in ("tienda", "empleado", "salario_diario", "fecha", "entrada", "salida") if c not in df]
     if missing:
-        out.errors.append(f"Faltan columnas en la programación: {', '.join(missing)}")
+        out.errors.append(FORMATO_MSG + f" Faltan: {', '.join(missing)}.")
         return out
 
     min_w = {z: config.min_wage(2026, z)[0] for z in config.SALARY_ZONES}
@@ -117,6 +126,9 @@ def load_chain(schedule_f, requirement_f=None, year: int = 2030, pre_post_min: i
                                                        .split("|") if x[:3] in WEEKDAYS) or None}
     if bad_rows:
         out.warnings.append(f"{bad_rows} filas de programación ignoradas (fecha, hora o salario ilegibles).")
+    if not shifts_by_store:
+        out.errors.append(FORMATO_MSG)
+        return out
 
     below = [(st, e) for (st, e), v in emp_rows.items() if v["daily_salary"] < float(min_w[v["zone"]]) - 0.005]
     if below:
@@ -130,18 +142,17 @@ def load_chain(schedule_f, requirement_f=None, year: int = 2030, pre_post_min: i
         try:
             req_all = _read(requirement_f)
             need = [c for c in ("tienda", "hora", "personas_requeridas") if c not in req_all]
-            if need or not ({"fecha"} & set(req_all) or {"dia"} & set(req_all)):
-                out.errors.append("El requerimiento necesita: tienda, fecha (o dia), hora, personas_requeridas.")
-                return out
+            assert not need and ({"fecha"} & set(req_all) or {"dia"} & set(req_all))
             out.requirement_source = "uploaded"
-        except Exception as e:  # noqa: BLE001
-            out.errors.append(f"No se pudo leer el requerimiento: {e}")
-            return out
-    else:
+        except Exception:  # noqa: BLE001  (bad format -> fall back to current coverage)
+            req_all = None
+            out.warnings.append(REQ_BAD_MSG)
+    if req_all is None:
         out.requirement_source = "current coverage"
-        out.warnings.append("Sin archivo de requerimiento: se usa la cobertura actual de cada tienda (personas en "
-                            "piso por hora) como requerimiento. El ahorro sale de las horas extra, primas y descansos "
-                            "trabajados; no mide sobre- ni subdotación reales.")
+        if requirement_f is None:
+            out.warnings.append("Sin archivo de requerimiento: se usa la cobertura actual de cada tienda (personas "
+                                "en piso por hora) como requerimiento. El ahorro sale de las horas extra, primas y "
+                                "descansos trabajados; no mide sobre- ni subdotación reales.")
 
     for st, shifts in sorted(shifts_by_store.items(), key=lambda kv: (len(kv[0]), kv[0])):
         first = min(s.day for s in shifts)
@@ -156,22 +167,29 @@ def load_chain(schedule_f, requirement_f=None, year: int = 2030, pre_post_min: i
             out.warnings.append(f"Tienda {st}: sin personal en piso; se omite.")
             continue
 
+        req = None
         if req_all is not None:
-            req = req_all[req_all["tienda"].astype(str) == st].copy()
-            if req.empty:
-                out.warnings.append(f"Tienda {st}: sin requerimiento en el archivo; se omite.")
-                continue
-            if "fecha" not in req:
-                req["fecha"] = [(wk + timedelta(days=WEEKDAYS[str(x)[:3].lower()])).isoformat() for x in req["dia"]]
-            req = pd.DataFrame({"date": [_date(x).isoformat() for x in req["fecha"]],
-                                "hour": req["hora"].astype(float).astype(int),
-                                "required_headcount": req["personas_requeridas"].astype(float).round().astype(int),
-                                "is_peak": req.get("es_pico", pd.Series([None] * len(req), index=req.index))})
-            req = req.groupby(["date", "hour"], as_index=False).agg(required_headcount=("required_headcount", "sum"),
-                                                                  is_peak=("is_peak", "first"))
-        else:
+            rq = req_all[req_all["tienda"].astype(str) == st].copy()
+            try:
+                if "fecha" not in rq:
+                    rq["fecha"] = [(wk + timedelta(days=WEEKDAYS[str(x)[:3].lower()])).isoformat() for x in rq["dia"]]
+                rq = pd.DataFrame({"date": [_date(x).isoformat() for x in rq["fecha"]],
+                                   "hour": rq["hora"].astype(float).astype(int),
+                                   "required_headcount": rq["personas_requeridas"].astype(float).round().astype(int),
+                                   "is_peak": rq.get("es_pico", pd.Series([None] * len(rq), index=rq.index))})
+                rq = rq[(pd.to_datetime(rq["date"]).dt.date >= wk)
+                        & (pd.to_datetime(rq["date"]).dt.date < wk + timedelta(days=7))]
+                req = rq.groupby(["date", "hour"], as_index=False).agg(
+                    required_headcount=("required_headcount", "sum"), is_peak=("is_peak", "first")) if len(rq) else None
+            except Exception:  # noqa: BLE001  (unparseable rows -> fall back below)
+                req = None
+        if req is None or req.empty:
+            if req_all is not None:
+                out.warnings.append(f"Tienda {st}: el requerimiento no coincide con la semana de la programación "
+                                    "(fechas fuera de rango); se usa la cobertura actual.")
+                out.requirement_source = "current coverage"
             req = _coverage_as_requirement(floor_shifts, wk)
-        if req["is_peak"].isna().any() or "is_peak" not in req:
+        if "is_peak" not in req or req["is_peak"].isna().any():
             req = _mark_peaks(req, peak_pct)
         req["is_peak"] = req["is_peak"].astype(float).fillna(0).astype(int)
         req = req[(pd.to_datetime(req["date"]).dt.date >= wk) & (pd.to_datetime(req["date"]).dt.date < wk + timedelta(days=7))]

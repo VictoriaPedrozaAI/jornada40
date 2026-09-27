@@ -67,3 +67,33 @@ def test_chain_schedule_closed_days_and_hours():
     ch2 = load_chain(P / "programacion_actual.csv", P / "requerimiento.csv", 2030, day_hours=dh)
     r6 = run_store(ch2.stores["SP-01"], settings=OptimizerSettings(week_policy="6"))
     assert r6.opt.status == "NO_APLICA"
+
+
+def test_load_chain_bad_files_never_crash():
+    import io
+    from jornada40.ingest.flat import load_chain, FORMATO_MSG
+    DH = {d: ("09:00", "22:00") for d in range(6)} | {6: None}
+    sched = b"tienda,empleado,salario_diario,fecha,entrada,salida\nT1,E1,400,2026-09-28,09:00,17:00\n"
+    # format errors -> friendly message, no exception
+    for bad in (b"", b"\x89PNG\r\n", b"a,b,c\n1,2,3\n"):
+        r = load_chain(io.BytesIO(bad), None, 2030, day_hours=DH)
+        assert r.errors and not r.stores
+    r = load_chain(io.BytesIO(b"a,b,c\n1,2,3\n"), None, 2030, day_hours=DH)
+    assert r.errors[0] == FORMATO_MSG + " Faltan: tienda, empleado, salario_diario, fecha, entrada, salida."
+    # requirement out of the schedule week (previously a TypeError crash) -> fall back to coverage
+    req = b"tienda,fecha,hora,personas_requeridas\nT1,2020-01-01,9,5\n"
+    r = load_chain(io.BytesIO(sched), io.BytesIO(req), 2030, day_hours=DH)
+    assert not r.errors and len(r.stores) == 1 and r.requirement_source == "current coverage"
+    # requirement with wrong columns -> ignored with a warning, not blocking
+    r = load_chain(io.BytesIO(sched), io.BytesIO(b"foo,bar\n1,2\n"), 2030, day_hours=DH)
+    assert not r.errors and len(r.stores) == 1 and any("requerimiento" in w for w in r.warnings)
+
+
+def test_optimizer_handles_24h_store():
+    from jornada40.ingest.flat import load_chain
+    from jornada40.pipeline import ROOT
+    P = ROOT / "data" / "test_company"
+    ch = load_chain(P / "programacion_actual.csv", P / "requerimiento.csv", 2030,
+                    day_hours={d: ("00:00", "24:00") for d in range(7)})
+    r = run_store(ch.stores["SP-01"], settings=OptimizerSettings(week_policy="5", allow_sixth_day=False))
+    assert r.opt.status == "OPTIMAL" and r.proposed.cost.understaff_peak_person_h == 0
