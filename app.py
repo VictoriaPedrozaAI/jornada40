@@ -261,14 +261,18 @@ def page_home() -> None:
 
 
 # ================================================================ DIAGNÓSTICO
-def coverage_gap_chart(cov: pd.DataFrame, day_label: str) -> alt.VConcatChart:
-    """Requerido vs Actual for one day: thick baseline, shaded gap (red = people above requirement,
-    orange = below) and a delta bar chart underneath (Actual − Requerido). CHANGELOG #7."""
+def coverage_gap_chart(cov: pd.DataFrame, day_label: str, prop: pd.Series | None = None) -> alt.VConcatChart:
+    """Requerido vs Actual (and, if given, Propuesta) for one day.
+    - thick black baseline = Requerido; red/orange shading = people above/below the requirement;
+    - without `prop`: the gap and the delta bars refer to Actual (Diagnóstico, CHANGELOG #7);
+    - with `prop`: the gap and the delta bars refer to Propuesta, and Actual is a thin dashed line
+      for reference (Generar Programación, CHANGELOG #10)."""
     d = cov.copy()
-    d["delta"] = d["have"] - d["need"]
-    d["hi"] = d[["have", "need"]].max(axis=1)
-    d["over"] = d["have"].where(d["have"] > d["need"], d["need"])
-    d["under"] = d["have"].where(d["have"] < d["need"], d["need"])
+    d["prop"] = prop.values if prop is not None else d["have"]
+    ref = "prop"
+    d["delta"] = d[ref] - d["need"]
+    d["over"] = d[ref].where(d[ref] > d["need"], d["need"])
+    d["under"] = d[ref].where(d[ref] < d["need"], d["need"])
     x = alt.X("t:T", title=None, axis=alt.Axis(format="%H:%M"))
     over = alt.Chart(d).mark_area(interpolate="step-after", opacity=0.35, color=CUR).encode(
         x=x, y=alt.Y("need:Q"), y2="over:Q")
@@ -276,17 +280,31 @@ def coverage_gap_chart(cov: pd.DataFrame, day_label: str) -> alt.VConcatChart:
         x=x, y=alt.Y("need:Q"), y2="under:Q")
     peaks = alt.Chart(d[d["is_peak"] == 1]).mark_rect(opacity=0.10, color=NEED).encode(
         x="t:T", x2="t_end:T").transform_calculate(t_end="datum.t + 30*60*1000")
-    lines = alt.Chart(d.melt(id_vars=["t"], value_vars=["need", "have"], var_name="serie", value_name="personas")
-                      .replace({"need": "Requerido", "have": "Actual"})).mark_line(interpolate="step-after").encode(
+    if prop is None:
+        series, domain, rng = ["need", "have"], ["Requerido", "Actual"], [NEED, CUR]
+        labels = {"need": "Requerido", "have": "Actual"}
+        width = alt.StrokeWidth("serie:N", legend=None, scale=alt.Scale(domain=domain, range=[4, 2]))
+        dash = alt.value([1, 0])
+        ref_name = "Actual"
+    else:
+        series, domain, rng = ["need", "have", "prop"], ["Requerido", "Actual", "Propuesta"], [NEED, "#8A8F8C", PRO]
+        labels = {"need": "Requerido", "have": "Actual", "prop": "Propuesta"}
+        width = alt.StrokeWidth("serie:N", legend=None,
+                                scale=alt.Scale(domain=domain, range=[4, 1.5, 2.5]))
+        dash = alt.StrokeDash("serie:N", legend=None,
+                              scale=alt.Scale(domain=domain, range=[[1, 0], [4, 3], [1, 0]]))
+        ref_name = "Propuesta"
+    lines = alt.Chart(d.melt(id_vars=["t"], value_vars=series, var_name="serie", value_name="personas")
+                      .replace(labels)).mark_line(interpolate="step-after").encode(
         x=x, y=alt.Y("personas:Q", title="Personas en piso"),
         color=alt.Color("serie:N", title=None, legend=alt.Legend(orient="top"),
-                        scale=alt.Scale(domain=["Requerido", "Actual"], range=[NEED, CUR])),
-        strokeWidth=alt.condition(alt.datum.serie == "Requerido", alt.value(4), alt.value(2)),
+                        scale=alt.Scale(domain=domain, range=rng)),
+        strokeWidth=width, strokeDash=dash,
         tooltip=[alt.Tooltip("t:T", format="%H:%M", title="Hora"), alt.Tooltip("serie:N", title=""),
                  alt.Tooltip("personas:Q", title="Personas")])
-    top = (peaks + over + under + lines).properties(height=300, title=f"{day_label}: requerido vs actual")
+    top = (peaks + over + under + lines).properties(height=300, title=f"{day_label}: requerido vs {ref_name.lower()}")
     bars = alt.Chart(d).mark_bar(size=9).encode(
-        x=x, y=alt.Y("delta:Q", title="Actual − Requerido"),
+        x=x, y=alt.Y("delta:Q", title=f"{ref_name} − Requerido"),
         color=alt.condition(alt.datum.delta > 0, alt.value(CUR), alt.value(UP)),
         tooltip=[alt.Tooltip("t:T", format="%H:%M", title="Hora"), alt.Tooltip("delta:Q", title="Diferencia")]
     ).properties(height=120)
@@ -440,38 +458,6 @@ def valid(res: dict) -> dict:
     return {k: r for k, r in res.items() if r.opt.status != "NO_APLICA"}
 
 
-def waterfall(cur, pro, title: str) -> alt.Chart:
-    """Current cost -> proposed cost, step by step (base salaries are equal on both sides)."""
-    steps = [("Horas extra", float(pro.overtime_2x + pro.overtime_3x - cur.overtime_2x - cur.overtime_3x)),
-             ("Descansos", float(pro.restday_extra - cur.restday_extra)),
-             ("Feriados", float(pro.feriado_extra - cur.feriado_extra)),
-             ("Prima dom.", float(pro.prima_dominical - cur.prima_dominical))]
-    rows, level = [("Actual", 0.0, float(cur.total_cash), "total")], float(cur.total_cash)
-    for name, delta in steps:
-        rows.append((name, level, level + delta, "sube" if delta > 0 else "baja"))
-        level += delta
-    rows.append(("Propuesto", 0.0, float(pro.total_cash), "total"))
-    df = pd.DataFrame(rows, columns=["paso", "y0", "y1", "tipo"])
-    df["delta"] = df.y1 - df.y0
-    df["lbl"] = [f"${v:,.0f}" if t == "total" else f"{'+' if d > 0 else '−'}${abs(d):,.0f}"
-                 for v, d, t in zip(df.y1, df.delta, df.tipo)]
-    lo = min(df.loc[df.tipo != "total", ["y0", "y1"]].min().min(), float(pro.total_cash)) * 0.97
-    df["y0"] = df.y0.clip(lower=lo)
-    base = alt.Chart(df).encode(x=alt.X("paso:N", sort=None, title=None,
-                                        axis=alt.Axis(labelAngle=0, labelLimit=120, labelOverlap=False,
-                                                      labelFontSize=11)))
-    bars = base.mark_bar(size=46).encode(
-        y=alt.Y("y0:Q", title="MXN por semana", scale=alt.Scale(domain=[lo, float(cur.total_cash) * 1.01])),
-        y2="y1:Q",
-        color=alt.Color("tipo:N", legend=None, scale=alt.Scale(domain=["total", "baja", "sube"],
-                                                                range=["#6E7C77", DOWN, UP])),
-        tooltip=["paso", alt.Tooltip("delta:Q", format=",.0f", title="MXN")])
-    df["top"] = df[["y0", "y1"]].max(axis=1)
-    labels = alt.Chart(df).mark_text(dy=-8, fontSize=12).encode(
-        x=alt.X("paso:N", sort=None), y="top:Q", text="lbl:N")
-    return (bars + labels).properties(title=title, height=320)
-
-
 def page_new() -> None:
     st.title("Generar programación")
     if "results" not in ss:
@@ -502,6 +488,13 @@ def page_new() -> None:
         return
     summ = pd.DataFrame([r.summary() for r in results.values()])
     summ["store_id"] = list(results)
+    short = summ[summ.proposed_peak_short_h > 0]
+    if len(short):  # CHANGELOG #10: the challenge forbids peak understaffing
+        st.warning(f"**Esta propuesta no cumple «sin subdotación en horas pico»** en {len(short)} de {len(summ)} "
+                   f"tiendas ({short.proposed_peak_short_h.sum():,.0f} persona-h faltantes en pico). Con {choice.lower()} "
+                   "el personal no alcanza para cubrir todos los picos; elige el otro tipo de semana o revisa el "
+                   "requerimiento. Tiendas: " + ", ".join(map(str, short.store_id.tolist()[:15]))
+                   + (" …" if len(short) > 15 else ""))
 
     # --- Programación actual vs propuesta (chain)
     st.subheader("Programación actual vs propuesta")
@@ -522,7 +515,12 @@ def page_new() -> None:
          tot("proposed", "understaff_person_h") / 40, "fte"),
         ("Subdotación en horas pico (persona-h)", tot("current", "understaff_peak_person_h"),
          tot("proposed", "understaff_peak_person_h"), "h"),
+        ("Valor de la sobredotación (MXN/semana)", tot("current", "overstaff_value"), tot("proposed", "overstaff_value"),
+         "mxn"),
     ]
+    cash_saving = tot("current", "total_cash") - tot("proposed", "total_cash")
+    over_saving = tot("current", "overstaff_value") - tot("proposed", "overstaff_value")
+    total_saving = cash_saving + over_saving
     def f(v, kind):
         return {"mxn": f"${v:,.0f}", "h": f"{v:,.0f} h", "n": f"{v:,.0f}", "fte": f"{v:,.1f}"}[kind]
     def fd(a, b, kind):
@@ -532,18 +530,26 @@ def page_new() -> None:
                 "fte": f"{d:+,.1f}"}[kind] + pct
     cmp_df = pd.DataFrame([(n, f(a, k), f(b, k), fd(a, b, k)) for n, a, b, k in rows],
                           columns=["Concepto", "Actual", "Propuesta", "Diferencia"]).set_index("Concepto")
-    st.dataframe(cmp_df, width="stretch")
+    base = tot("current", "total_cash")
+    cmp_df.loc["Ahorro en efectivo (horas extra y primas)"] = ["", "", f"${cash_saving:,.0f} ({cash_saving / base * 100:.1f} %)"]
+    cmp_df.loc["Sobredotación evitada (valor)"] = ["", "", f"${over_saving:,.0f} ({over_saving / base * 100:.1f} %)"]
+    cmp_df.loc["**Ahorro total: horas extra + sobredotación evitada**"] = [
+        "", "", f"${total_saving:,.0f} ({total_saving / base * 100:.1f} % del costo laboral actual)"]
+    st.dataframe(cmp_df, width="stretch", height=35 * (len(cmp_df) + 1) + 3)
     st.caption(f"{len(results)} tiendas · semana del {next(iter(results.values())).inp.week_start:%d/%m/%Y} · "
                f"{choice.lower()} · solver: {', '.join(f'{n} {s}' for s, n in summ.solver_status.value_counts().items())}. "
-               "Salarios base iguales en ambos lados: la diferencia de costo viene de horas extra y primas. "
-               "Empleados de tiempo completo = persona-horas ÷ 40.")
+               "Salarios base iguales en ambos lados. **Ahorro total** = efectivo que se deja de pagar (horas extra, "
+               "descansos trabajados, feriados, prima dominical) + valor de las horas de sobredotación evitadas "
+               "(persona-h × costo promedio por hora), según la definición del reto (horas extra y sobrestaffing "
+               "evitados). Empleados de tiempo completo = persona-horas ÷ 40. **Horas pico** = el 20 % de horas con "
+               "mayor requerimiento de cada día, o las marcadas con es_pico = 1 en requerimiento.csv.")
 
     tbl = summ[["store_id", "employees", "current_total", "proposed_total", "saving_mxn", "saving_pct", "current_ot_h",
-                "proposed_ot_h", "current_restday_calls", "current_peak_short_h", "proposed_peak_short_h",
-                "solver_status"]]
+                "proposed_ot_h", "current_restday_calls", "proposed_restday_calls", "current_peak_short_h",
+                "proposed_peak_short_h", "solver_status"]]
     tbl.columns = ["tienda", "empleados", "costo_actual", "costo_propuesto", "ahorro", "ahorro_%",
-                   "horas_extra_antes", "horas_extra_despues", "descansos_trabajados_antes", "faltante_pico_antes",
-                   "faltante_pico_despues", "solver"]
+                   "horas_extra_antes", "horas_extra_despues", "descansos_trabajados_antes",
+                   "descansos_trabajados_despues", "faltante_pico_antes", "faltante_pico_despues", "solver"]
     st.dataframe(tbl, hide_index=True, width="stretch", height=260,
                  column_config={c: st.column_config.NumberColumn(format="$%,.0f")
                                 for c in ("costo_actual", "costo_propuesto", "ahorro")})
@@ -587,24 +593,45 @@ def page_new() -> None:
              delta=f"{pro.overstaff_person_h - cur.overstaff_person_h:+,.0f} h", delta_color="inverse")
     t1, t2, t3 = st.tabs(["Cobertura", "Desglose del ahorro", "Programación propuesta"])
     with t1:
-        cc = x.current.coverage[["t", "need", "is_peak", "have"]].rename(columns={"have": "Actual"})
-        cc["Propuesta"] = x.proposed.coverage.set_index("t")["have"].reindex(cc["t"]).fillna(0).values
+        cc = x.current.coverage[["t", "need", "is_peak", "have"]].copy()
+        cc["prop"] = x.proposed.coverage.set_index("t")["have"].reindex(cc["t"]).fillna(0).values
         cc["dia"] = cc["t"].map(dia)
-        day = st.radio("Día", list(dict.fromkeys(cc["dia"])), horizontal=True)
-        dd = cc[cc["dia"] == day].melt(id_vars=["t", "is_peak"], value_vars=["need", "Actual", "Propuesta"],
-                                       var_name="serie", value_name="personas")
-        dd["serie"] = dd["serie"].replace({"need": "Requerido"})
-        band = alt.Chart(cc[(cc["dia"] == day) & (cc["is_peak"] == 1)]).mark_rect(opacity=0.12, color=NEED).encode(
-            x="t:T", x2="t_end:T").transform_calculate(t_end="datum.t + 30*60*1000")
-        line = alt.Chart(dd).mark_line(interpolate="step-after", strokeWidth=2.5).encode(
-            x=alt.X("t:T", title=None, axis=alt.Axis(format="%H:%M")), y=alt.Y("personas:Q", title="Personas en piso"),
-            color=alt.Color("serie:N", title=None, legend=alt.Legend(orient="bottom"),
-                            scale=alt.Scale(domain=["Requerido", "Actual", "Propuesta"], range=[NEED, CUR, PRO])),
-            strokeDash=alt.condition(alt.datum.serie == "Requerido", alt.value([4, 3]), alt.value([0])))
-        st.altair_chart(band + line, width="stretch")
-        st.caption("Franjas sombreadas = horas pico (sin subdotación permitida). Intervalos de 30 min.")
+        day = st.radio("Día", list(dict.fromkeys(cc["dia"])), horizontal=True, key="new_day")
+        dd = cc[cc["dia"] == day]
+        st.altair_chart(coverage_gap_chart(dd, day, prop=dd["prop"]), width="stretch")
+        over_h = float((dd["prop"] - dd["need"]).clip(lower=0).sum() * 0.5)
+        under_h = float((dd["need"] - dd["prop"]).clip(lower=0).sum() * 0.5)
+        st.caption(f"Sombreado y barras = propuesta frente a lo requerido: rojo = gente de más ({over_h:,.0f} persona-h "
+                   f"ese día), naranja = gente de menos ({under_h:,.0f} persona-h). Línea gruesa = requerido; línea "
+                   "punteada gris = programación actual. Franjas grises = horas pico. Intervalos de 30 min.")
     with t2:
-        st.altair_chart(waterfall(cur, pro, f"Tienda {sid}"), width="stretch")
+        comp = pd.DataFrame({
+            "concepto": ["Horas extra", "Descansos trabajados", "Feriados", "Prima dominical", "Sobredotación (valor)"],
+            "Actual": [float(cur.overtime_2x + cur.overtime_3x), float(cur.restday_extra), float(cur.feriado_extra),
+                       float(cur.prima_dominical), float(cur.overstaff_value)],
+            "Propuesta": [float(pro.overtime_2x + pro.overtime_3x), float(pro.restday_extra),
+                          float(pro.feriado_extra), float(pro.prima_dominical), float(pro.overstaff_value)]})
+        comp["Diferencia"] = comp["Propuesta"] - comp["Actual"]
+        long = comp.melt(id_vars="concepto", value_vars=["Actual", "Propuesta"], var_name="prog", value_name="MXN")
+        chart = alt.Chart(long).mark_bar().encode(
+            x=alt.X("concepto:N", sort=None, title=None, axis=alt.Axis(labelAngle=0, labelLimit=140)),
+            y=alt.Y("MXN:Q", title="MXN por semana"),
+            xOffset=alt.XOffset("prog:N", sort=["Actual", "Propuesta"]),
+            color=alt.Color("prog:N", title=None, scale=alt.Scale(domain=["Actual", "Propuesta"], range=[CUR, PRO]),
+                            legend=alt.Legend(orient="top")),
+            tooltip=[alt.Tooltip("concepto:N", title="Concepto"), alt.Tooltip("prog:N", title=""),
+                     alt.Tooltip("MXN:Q", format="$,.0f")])
+        text = alt.Chart(long).mark_text(dy=-6, fontSize=11).encode(
+            x=alt.X("concepto:N", sort=None), y="MXN:Q", xOffset=alt.XOffset("prog:N", sort=["Actual", "Propuesta"]),
+            text=alt.Text("MXN:Q", format="$,.0f"))
+        st.altair_chart((chart + text).properties(height=320, title=f"Tienda {sid}: qué se paga hoy vs con la propuesta"),
+                        width="stretch")
+        tab = comp.set_index("concepto")
+        tab.loc["Total"] = tab.sum()
+        st.dataframe(tab.style.format("${:,.0f}"), width="stretch")
+        st.caption("Los salarios base son iguales en ambos lados y no aparecen. Las primeras cuatro barras son efectivo "
+                   "pagado; «Sobredotación (valor)» es el costo de las horas con gente de más (persona-h × costo "
+                   "promedio por hora), que el reto cuenta como ahorro cuando se evita.")
     with t3:
         rr = shift_rows(x.proposed.shifts, x.inp.employees)
         rr["turno"] = rr["start_time"] + "–" + rr["end_time"] + " " + rr["jornada_code"]
