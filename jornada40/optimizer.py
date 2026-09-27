@@ -158,15 +158,24 @@ def optimize_store(employees: pd.DataFrame, requirement: pd.DataFrame, store: di
 
     employees: employee_id, daily_salary, [is_minor] - floor staff only (minors excluded in the MVP).
     requirement: date, hour, required_headcount, is_peak (one store, 7 days from week_start).
-    store: opening_time, closing_time, pre_open_minutes, post_close_minutes."""
+    store: opening_time, closing_time, pre_open_minutes, post_close_minutes, [day_hours]."""
     st = settings or OptimizerSettings()
     hm = lambda s: int(str(s)[:2]) * 60 + int(str(s)[3:5])  # noqa: E731
-    o, c = hm(store["opening_time"]), hm(store["closing_time"])
     pre, post = int(store.get("pre_open_minutes", 60)), int(store.get("post_close_minutes", 60))
-    wts = week_types(st.year, st.allow_six_day_weeks, st.allow_sixth_day, st.week_policy)
-    tpl = {w.name: generate_templates(o, c, pre, post, st.start_step_min, w.diurna_len, w.mixta_len)
-           for w in wts}
     days = [week_start + timedelta(days=i) for i in range(7)]
+    # opening hours per day (v3): store["day_hours"] = {weekday: (open, close) | None (closed)};
+    # without it every day uses opening_time / closing_time
+    dh = store.get("day_hours")
+    window = {d: (dh.get(days[d].weekday()) if dh else (store["opening_time"], store["closing_time"]))
+              for d in range(7)}
+    open_days = [d for d in range(7) if window[d]]
+    wts = [w for w in week_types(st.year, st.allow_six_day_weeks, st.allow_sixth_day, st.week_policy)
+           if w.days <= len(open_days)]
+    if not wts:  # e.g. 6-day weeks with a store closed 2 days, or fewer than 5 open days
+        return OptimizerResult([], "NO_APLICA", math.nan, math.nan, 0.0, [])
+    tpl = {(w.name, d): (generate_templates(hm(window[d][0]), hm(window[d][1]), pre, post, st.start_step_min,
+                                            w.diurna_len, w.mixta_len) if window[d] else [])
+           for w in wts for d in range(7)}
     emp = employees.copy()
     if "is_minor" in emp:
         emp = emp[~emp["is_minor"].astype(bool)]
@@ -188,18 +197,19 @@ def optimize_store(employees: pd.DataFrame, requirement: pd.DataFrame, store: di
 
     m = cp_model.CpModel()
     n = {(w.name, d, t): m.new_int_var(0, n_emp, f"n_{w.name}_{d}_{t}")
-         for w in wts for d in range(7) for t in range(len(tpl[w.name]))}
+         for w in wts for d in range(7) for t in range(len(tpl[w.name, d]))}
+    # weekly patterns never include a day the store is closed
     y = {(w.name, p): m.new_int_var(0, n_emp, f"y_{w.name}_{i}")
-         for w in wts for i, p in enumerate(work_patterns(w.days))}
+         for w in wts for i, p in enumerate(work_patterns(w.days)) if all(window[d] for d in range(7) if p[d])}
     m.add(sum(y.values()) == n_emp)
     for w in wts:
         for d in range(7):
-            m.add(sum(n[w.name, d, t] for t in range(len(tpl[w.name])))
+            m.add(sum(n[w.name, d, t] for t in range(len(tpl[w.name, d])))
                   == sum(v for (wn, p), v in y.items() if wn == w.name and p[d]))
 
     cover: dict[tuple[int, int], list] = {}
     for (wn, d, t), v in n.items():
-        for sl in slots_of(tpl[wn][t]):
+        for sl in slots_of(tpl[wn, d][t]):
             cover.setdefault((d, sl), []).append(v)
     groups: dict[str, list] = {k: [] for k in OBJECTIVE_COMPONENTS}
     for key in set(cover) | set(need):
@@ -230,7 +240,7 @@ def optimize_store(employees: pd.DataFrame, requirement: pd.DataFrame, store: di
     solver.parameters.num_workers = st.workers
     status = solver.solve(m)
     name = solver.status_name(status)
-    all_tpl = [t for w in wts for t in tpl[w.name]]
+    all_tpl = [t for ts in tpl.values() for t in ts]
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return OptimizerResult([], name, math.nan, math.nan, solver.wall_time, all_tpl)
 
@@ -250,10 +260,11 @@ def optimize_store(employees: pd.DataFrame, requirement: pd.DataFrame, store: di
         members = sorted(e for e, (wn, _) in plan.items() if wn == w.name)
         for d in range(7):
             on = [e for e in members if plan[e][1][d]]
-            todo = [t for t in range(len(tpl[w.name])) for _ in range(solver.value(n[w.name, d, t]))]
-            todo.sort(key=lambda t: (tpl[w.name][t].start, tpl[w.name][t].code))
+            ts = tpl[w.name, d]
+            todo = [t for t in range(len(ts)) for _ in range(solver.value(n[w.name, d, t]))]
+            todo.sort(key=lambda t: (ts[t].start, ts[t].code))
             for e, t in zip(on, todo):
-                shifts.append(Shift.from_def(e, days[d], tpl[w.name][t]))
+                shifts.append(Shift.from_def(e, days[d], ts[t]))
     comps = {k: (solver.value(sum(g)) / 100 if g else 0.0) for k, g in groups.items()}
     return OptimizerResult(shifts, name, solver.objective_value / 100, solver.best_objective_bound / 100,
                            solver.wall_time, all_tpl, comps)
