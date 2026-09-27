@@ -78,22 +78,10 @@ def dia(ts) -> str:
 
 
 def templates_zip() -> bytes:
-    """v3: only the filled example (50 stores x 80 employees) + instructions, no empty template."""
+    """v3: only the two filled example templates (50 stores x 80 employees); no LEEME (CHANGELOG #11)."""
     return zip_bytes({
         "programacion_actual.csv": (TPL / "ejemplo_programacion_actual_50_tiendas.csv").read_bytes(),
-        "requerimiento.csv": (TPL / "ejemplo_requerimiento_50_tiendas.csv").read_bytes(),
-        "LEEME.txt": (
-            "Plantillas de ejemplo llenas: 50 tiendas x 80 empleados. Sustituye las filas por tus datos.\n\n"
-            "programacion_actual.csv (obligatorio): una fila por turno trabajado en la semana.\n"
-            "  tienda, empleado, puesto, salario_diario (MXN), en_piso (1 atiende piso / 0 administrativo),\n"
-            "  dias_descanso (p. ej. sab|dom), zona (general|zlfn), fecha (AAAA-MM-DD), entrada, salida (HH:MM).\n"
-            "  Si la salida es menor que la entrada, el turno termina al día siguiente.\n\n"
-            "requerimiento.csv (opcional pero recomendado): número de EMPLEADOS (no clientes) que necesitas en\n"
-            "  piso en cada hora de cada día. Columnas: tienda, fecha, hora (0-23), personas_requeridas,\n"
-            "  es_pico (1/0, opcional). Con este archivo detectamos horas con gente de más o de menos y los\n"
-            "  turnos siguen tu demanda; sin él se conserva tu cobertura actual hora por hora.\n\n"
-            "El horario de apertura y cierre y los días que la tienda cierra se capturan en la app (Inicio).\n"
-        ).encode()})
+        "requerimiento.csv": (TPL / "ejemplo_requerimiento_50_tiendas.csv").read_bytes()})
 
 
 @st.cache_resource(show_spinner=False)
@@ -226,9 +214,10 @@ def page_home() -> None:
     st.info("**Importante:** la plantilla de requerimiento es opcional, sin embargo es aconsejable llenarla pues "
             "contiene información relevante sobre el número de empleados mínimos necesarios por hora para cubrir "
             "las necesidades de tu operación.")
-    st.download_button("Descargar plantilla", templates_zip(), "jornada40_plantillas_ejemplo_50_tiendas.zip",
+    st.download_button("Descargar plantillas", templates_zip(), "jornada40_plantillas_ejemplo_50_tiendas.zip",
                        type="primary", icon=":material/download:")
-    st.caption("La plantilla viene llena con el ejemplo de 50 tiendas × 80 empleados; sustituye las filas por tus datos.")
+    st.caption("Las dos plantillas vienen llenas con el ejemplo de 50 tiendas × 80 empleados; sustituye las filas por "
+               "tus datos. requerimiento.csv: número de **empleados** (no clientes) necesarios en piso por hora.")
 
     st.markdown("**Nota:** cuando tengas las plantillas llenas con tus datos, súbelas aquí:")
     f_sched = st.file_uploader("1. programacion_actual.csv", type="csv", key="up_sched")
@@ -274,10 +263,13 @@ def coverage_gap_chart(cov: pd.DataFrame, day_label: str, prop: pd.Series | None
     d["over"] = d[ref].where(d[ref] > d["need"], d["need"])
     d["under"] = d[ref].where(d[ref] < d["need"], d["need"])
     x = alt.X("t:T", title=None, axis=alt.Axis(format="%H:%M"))
-    over = alt.Chart(d).mark_area(interpolate="step-after", opacity=0.35, color=CUR).encode(
+    shade = 0.35 if prop is None else 0.22
+    over = alt.Chart(d).mark_area(interpolate="step-after", opacity=shade, color=CUR).encode(
         x=x, y=alt.Y("need:Q"), y2="over:Q")
-    under = alt.Chart(d).mark_area(interpolate="step-after", opacity=0.45, color=UP).encode(
+    under = alt.Chart(d).mark_area(interpolate="step-after", opacity=shade + 0.1, color=UP).encode(
         x=x, y=alt.Y("need:Q"), y2="under:Q")
+    halo = alt.Chart(d).mark_line(interpolate="step-after", strokeWidth=7, color="white", opacity=0.9).encode(
+        x=x, y="prop:Q") if prop is not None else None
     peaks = alt.Chart(d[d["is_peak"] == 1]).mark_rect(opacity=0.10, color=NEED).encode(
         x="t:T", x2="t_end:T").transform_calculate(t_end="datum.t + 30*60*1000")
     if prop is None:
@@ -287,10 +279,10 @@ def coverage_gap_chart(cov: pd.DataFrame, day_label: str, prop: pd.Series | None
         dash = alt.value([1, 0])
         ref_name = "Actual"
     else:
-        series, domain, rng = ["need", "have", "prop"], ["Requerido", "Actual", "Propuesta"], [NEED, "#8A8F8C", PRO]
+        series, domain, rng = ["need", "have", "prop"], ["Requerido", "Actual", "Propuesta"], [NEED, "#9AA0A6", "#0F7B5F"]
         labels = {"need": "Requerido", "have": "Actual", "prop": "Propuesta"}
         width = alt.StrokeWidth("serie:N", legend=None,
-                                scale=alt.Scale(domain=domain, range=[4, 1.5, 2.5]))
+                                scale=alt.Scale(domain=domain, range=[4, 1.5, 3.5]))
         dash = alt.StrokeDash("serie:N", legend=None,
                               scale=alt.Scale(domain=domain, range=[[1, 0], [4, 3], [1, 0]]))
         ref_name = "Propuesta"
@@ -302,7 +294,11 @@ def coverage_gap_chart(cov: pd.DataFrame, day_label: str, prop: pd.Series | None
         strokeWidth=width, strokeDash=dash,
         tooltip=[alt.Tooltip("t:T", format="%H:%M", title="Hora"), alt.Tooltip("serie:N", title=""),
                  alt.Tooltip("personas:Q", title="Personas")])
-    top = (peaks + over + under + lines).properties(height=300, title=f"{day_label}: requerido vs {ref_name.lower()}")
+    prop_line = alt.Chart(d).mark_line(interpolate="step-after", strokeWidth=3.5, color="#0F7B5F").encode(
+        x=x, y="prop:Q") if prop is not None else None
+    layers = [peaks, over, under] + ([halo] if halo is not None else []) + [lines] + \
+             ([prop_line] if prop_line is not None else [])
+    top = alt.layer(*layers).properties(height=300, title=f"{day_label}: requerido vs {ref_name.lower()}")
     bars = alt.Chart(d).mark_bar(size=9).encode(
         x=x, y=alt.Y("delta:Q", title=f"{ref_name} − Requerido"),
         color=alt.condition(alt.datum.delta > 0, alt.value(CUR), alt.value(UP)),
